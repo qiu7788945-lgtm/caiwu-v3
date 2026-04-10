@@ -583,6 +583,10 @@ export default function App() {
 
       // Parse the extracted text
       const noSpaceText = extractedText.replace(/\s+/g, '');
+      const isPdfFile = file.type === 'application/pdf';
+      const pdfHeaderText = isPdfFile ? extractedText.slice(0, 3000) : '';
+      const pdfHeaderNoSpaceText = pdfHeaderText.replace(/\s+/g, '');
+      const pdfFullText = isPdfFile ? extractedText : '';
       
       let invoice_code = null;
       let invoice_number = null;
@@ -597,12 +601,22 @@ export default function App() {
       let tax_rate = null;
 
       // 1. Invoice Number & Code
-      const numMatch = noSpaceText.match(/(?:发票号码|号码|发票号)[:：]?(\d{8,24})/);
-      if (numMatch) invoice_number = numMatch[1];
-      else {
-        // Fallback: look for 20-digit (fully digital) or 8-digit (traditional) numbers
-        const fallbackNum = noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/) || noSpaceText.match(/(?<!\d)(\d{8})(?!\d)/);
-        if (fallbackNum) invoice_number = fallbackNum[1];
+      if (isPdfFile) {
+        const pdfInvoiceNumberMatch = pdfHeaderNoSpaceText.match(/发票号码[:：]?(\d{8,24})/);
+        if (pdfInvoiceNumberMatch) invoice_number = pdfInvoiceNumberMatch[1];
+        else {
+          const pdfInvoiceNumberFallback = noSpaceText.match(/发票号码[:：]?(\d{8,24})/)
+            || noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
+          if (pdfInvoiceNumberFallback) invoice_number = pdfInvoiceNumberFallback[1];
+        }
+      } else {
+        const numMatch = noSpaceText.match(/(?:发票号码|号码|发票号)[:：]?(\d{8,24})/);
+        if (numMatch) invoice_number = numMatch[1];
+        else {
+          // Fallback: look for 20-digit (fully digital) or 8-digit (traditional) numbers
+          const fallbackNum = noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/) || noSpaceText.match(/(?<!\d)(\d{8})(?!\d)/);
+          if (fallbackNum) invoice_number = fallbackNum[1];
+        }
       }
 
       const codeMatch = noSpaceText.match(/(?:发票代码|代码)[:：]?(\d{10,12})/);
@@ -614,13 +628,20 @@ export default function App() {
       }
 
       // 2. Date
-      const explicitDateMatch = noSpaceText.match(/(?:开票日期|日期|时间)[:：]?\s*(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})[日号]?/);
-      if (explicitDateMatch) {
-        date = `${explicitDateMatch[1]}${explicitDateMatch[2].padStart(2, '0')}${explicitDateMatch[3].padStart(2, '0')}`;
+      if (isPdfFile) {
+        const pdfDateMatch = pdfHeaderNoSpaceText.match(/开票日期[:：]?(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})[日号]?/);
+        if (pdfDateMatch) {
+          date = `${pdfDateMatch[1]}${pdfDateMatch[2].padStart(2, '0')}${pdfDateMatch[3].padStart(2, '0')}`;
+        }
       } else {
-        const dateMatch = noSpaceText.match(/(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})[日号]?/);
-        if (dateMatch) {
-          date = `${dateMatch[1]}${dateMatch[2].padStart(2, '0')}${dateMatch[3].padStart(2, '0')}`;
+        const explicitDateMatch = noSpaceText.match(/(?:开票日期|日期|时间)[:：]?\s*(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})[日号]?/);
+        if (explicitDateMatch) {
+          date = `${explicitDateMatch[1]}${explicitDateMatch[2].padStart(2, '0')}${explicitDateMatch[3].padStart(2, '0')}`;
+        } else {
+          const dateMatch = noSpaceText.match(/(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})[日号]?/);
+          if (dateMatch) {
+            date = `${dateMatch[1]}${dateMatch[2].padStart(2, '0')}${dateMatch[3].padStart(2, '0')}`;
+          }
         }
       }
 
@@ -629,61 +650,132 @@ export default function App() {
       if (checkCodeMatch) check_code = checkCodeMatch[1];
 
       // 4. Companies
-      // First try explicit buyer/seller blocks
-      const buyerMatch = noSpaceText.match(/(?:购买方|购方|购货单位|交款人)(?:信息)?.*?(?:名称|称|名)[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,30})/);
-      if (buyerMatch) buyer_company = buyerMatch[1];
-      
-      const sellerMatch = noSpaceText.match(/(?:销售方|销方|销货单位|收款人)(?:信息)?.*?(?:名称|称|名)[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,30})/);
-      if (sellerMatch) seller_company = sellerMatch[1];
+      if (isPdfFile) {
+        const buyerBlockMatch = pdfHeaderNoSpaceText.match(/购买方信息([\s\S]{0,200}?)(?:销售方信息|项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
+        if (buyerBlockMatch) {
+          const buyerNameMatch = buyerBlockMatch[1].match(/名称[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,60}?)(?:纳税人识别号|统一社会信用代码|地址、电话|开户地址及账号|开户行及账号|电话|地址|$)/);
+          if (buyerNameMatch) buyer_company = buyerNameMatch[1];
+        }
 
-      // If explicit blocks fail, try general name matching
-      if (!buyer_company || !seller_company) {
-        const nameMatches = [...noSpaceText.matchAll(/(?:名称|称|名)[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]+?)(?:统一|社会|信用|代码|纳税人|识别号|密码|日期|开票|机器|税率|金额|税额|规格|单位|数量|单价|合计|小写|大写|¥|￥|$)/g)].map(m => m[1]);
-        const validNames = nameMatches.filter(n => n.length >= 4 && !/^\d+$/.test(n)); // exclude pure numbers
+        const sellerBlockMatch = pdfHeaderNoSpaceText.match(/销售方信息([\s\S]{0,200}?)(?:项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
+        if (sellerBlockMatch) {
+          const sellerNameMatch = sellerBlockMatch[1].match(/名称[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,60}?)(?:纳税人识别号|统一社会信用代码|地址、电话|开户地址及账号|开户行及账号|电话|地址|$)/);
+          if (sellerNameMatch) seller_company = sellerNameMatch[1];
+        }
+      } else {
+        // First try explicit buyer/seller blocks
+        const buyerMatch = noSpaceText.match(/(?:购买方|购方|购货单位|交款人)(?:信息)?.*?(?:名称|称|名)[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,30})/);
+        if (buyerMatch) buyer_company = buyerMatch[1];
         
-        if (!buyer_company && validNames.length > 0) buyer_company = validNames[0];
-        if (!seller_company && validNames.length > 1) seller_company = validNames[1];
-      }
-
-      // Final fallback: look for anything ending in "公司"
-      if (!buyer_company || !seller_company) {
-        const companyPattern = /[\u4e00-\u9fa5()（）a-zA-Z0-9]{2,30}(?:公司|厂|店|中心|局)/g;
-        const foundCompanies = [...noSpaceText.matchAll(companyPattern)].map(m => m[0]);
-        const uniqueCompanies = Array.from(new Set(foundCompanies));
-        
-        if (!buyer_company && uniqueCompanies.length > 0) buyer_company = uniqueCompanies[0];
-        if (!seller_company && uniqueCompanies.length > 1) seller_company = uniqueCompanies[1];
+        const sellerMatch = noSpaceText.match(/(?:销售方|销方|销货单位|收款人)(?:信息)?.*?(?:名称|称|名)[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,30})/);
+        if (sellerMatch) seller_company = sellerMatch[1];
       }
 
       // 5. Amounts
       // Match numbers with 2 decimal places, allowing comma instead of dot
       const parseAmt = (str: string) => parseFloat(str.replace(',', '.'));
-      
-      const totalMatch = noSpaceText.match(/(?:小写|价税合计|合计金额|金额合计).*?[¥￥Y]?(\d+[.,]\d{2})/);
-      if (totalMatch) total_amount = parseAmt(totalMatch[1]);
+      if (isPdfFile) {
+        const pdfAmountBlockText = extractedText.slice(0, 6000);
+        const pdfAmountBlockNoSpaceText = pdfAmountBlockText.replace(/\s+/g, '');
 
-      const sumMatch = noSpaceText.match(/合\s*计[^\d]*[¥￥Y]?(\d+[.,]\d{2})[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
-      if (sumMatch) {
-        amount = parseAmt(sumMatch[1]);
-        tax_amount = parseAmt(sumMatch[2]);
+        const pdfTotalMatch = pdfAmountBlockNoSpaceText.match(/价税合计(?:\(小写\)|（小写）|小写)?[^\d¥￥Y]*[¥￥Y]?(\d+[.,]\d{2})/);
+        if (pdfTotalMatch) total_amount = parseAmt(pdfTotalMatch[1]);
+
+        const pdfSumMatch = pdfAmountBlockNoSpaceText.match(/合计[^\d¥￥Y]*[¥￥Y]?(\d+[.,]\d{2})[^\d¥￥Y%]*(\d+[.,]\d{2})/);
+        if (pdfSumMatch) {
+          amount = parseAmt(pdfSumMatch[1]);
+          tax_amount = parseAmt(pdfSumMatch[2]);
+        }
+
+        const pdfTaxRateMatch = pdfAmountBlockNoSpaceText.match(/(?:税率|征收率)[:：]?\s*(13%|9%|6%|3%|1%|0%|免税|不征税)/)
+          || pdfAmountBlockNoSpaceText.match(/(13|9|6|3|1|0)[%％]/);
+        if (pdfTaxRateMatch) {
+          tax_rate = pdfTaxRateMatch[1].includes('%') || pdfTaxRateMatch[1] === '免税' || pdfTaxRateMatch[1] === '不征税'
+            ? pdfTaxRateMatch[1]
+            : `${pdfTaxRateMatch[1]}%`;
+        }
+
+        if (!invoice_number) {
+          const layoutInvoiceMatch = noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
+          if (layoutInvoiceMatch) invoice_number = layoutInvoiceMatch[1];
+        }
+
+        if (!date) {
+          const layoutDateMatch = noSpaceText.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+          if (layoutDateMatch) {
+            date = `${layoutDateMatch[1]}${layoutDateMatch[2].padStart(2, '0')}${layoutDateMatch[3].padStart(2, '0')}`;
+          }
+        }
+
+        const taxIdCandidates = [...new Set((noSpaceText.match(/[A-Z0-9]{15,25}/g) || []).filter(v => /[A-Z]/.test(v) && /\d/.test(v)))];
+        const firstTaxId = taxIdCandidates[0] || '';
+        const secondTaxId = taxIdCandidates[1] || '';
+        const firstTaxIdPos = firstTaxId ? noSpaceText.indexOf(firstTaxId) : -1;
+        const secondTaxIdPos = secondTaxId ? noSpaceText.indexOf(secondTaxId, firstTaxIdPos + firstTaxId.length) : -1;
+
+        const datePos = noSpaceText.search(/\d{4}年\d{1,2}月\d{1,2}日/);
+        const companyNamePattern = /(?:[\u4e00-\u9fa5()（）a-zA-Z0-9]{2,80})(?:有限责任公司|股份有限公司|分公司|事务所|工作室|中心|公司|店|厂)/g;
+        const cleanCompanyName = (value: string) => value
+          .replace(/\d{4}年\d{1,2}月\d{1,2}日/g, '')
+          .replace(/[A-Z0-9]{15,25}/g, '')
+          .replace(/开票日期/g, '')
+          .replace(/纳税人识别号|统一社会信用代码/g, '')
+          .trim();
+
+        if (!buyer_company && datePos >= 0 && firstTaxIdPos > datePos) {
+          const buyerSection = noSpaceText.slice(datePos, firstTaxIdPos).replace(/^\d{4}年\d{1,2}月\d{1,2}日/, '');
+          const buyerCompanyMatches = [...buyerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
+          if (buyerCompanyMatches.length > 0) {
+            buyer_company = buyerCompanyMatches[buyerCompanyMatches.length - 1];
+          }
+        }
+
+        if (!seller_company && firstTaxIdPos >= 0 && secondTaxIdPos > firstTaxIdPos) {
+          const sellerSection = noSpaceText.slice(firstTaxIdPos, secondTaxIdPos).replace(/^[A-Z0-9]{15,25}/, '');
+          const sellerCompanyMatches = [...sellerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
+          if (sellerCompanyMatches.length > 0) {
+            seller_company = sellerCompanyMatches[sellerCompanyMatches.length - 1];
+          }
+        }
+
+        const allYenAmounts = noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || [];
+        if ((amount === null || tax_amount === null || total_amount === null) && allYenAmounts.length >= 3) {
+          const firstAmount = allYenAmounts[0];
+          const secondAmount = allYenAmounts[1];
+          const lastAmount = allYenAmounts[allYenAmounts.length - 1];
+          if (amount === null && firstAmount) amount = parseAmt(firstAmount.slice(1));
+          if (tax_amount === null && secondAmount) tax_amount = parseAmt(secondAmount.slice(1));
+          if (total_amount === null && lastAmount) total_amount = parseAmt(lastAmount.slice(1));
+        }
+        if (!tax_rate) {
+          const layoutTaxRateMatch = noSpaceText.match(/(13|9|6|3|1|0)%/);
+          if (layoutTaxRateMatch) tax_rate = `${layoutTaxRateMatch[1]}%`;
+        }
       } else {
-        const amtMatch = noSpaceText.match(/金额[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
-        if (amtMatch) amount = parseAmt(amtMatch[1]);
-        const taxMatch = noSpaceText.match(/税额[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
-        if (taxMatch) tax_amount = parseAmt(taxMatch[1]);
-      }
+        const totalMatch = noSpaceText.match(/(?:小写|价税合计|合计金额|金额合计).*?[¥￥Y]?(\d+[.,]\d{2})/);
+        if (totalMatch) total_amount = parseAmt(totalMatch[1]);
 
-      if (!invoice_number && !total_amount) {
-        throw new Error("未能识别到发票关键信息，请确保图片清晰或PDF格式正确。");
+        const sumMatch = noSpaceText.match(/合\s*计[^\d]*[¥￥Y]?(\d+[.,]\d{2})[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
+        if (sumMatch) {
+          amount = parseAmt(sumMatch[1]);
+          tax_amount = parseAmt(sumMatch[2]);
+        } else {
+          const amtMatch = noSpaceText.match(/金额[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
+          if (amtMatch) amount = parseAmt(amtMatch[1]);
+          const taxMatch = noSpaceText.match(/税额[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
+          if (taxMatch) tax_amount = parseAmt(taxMatch[1]);
+        }
       }
 
       // 6. Tax Rate
-      const taxRateMatch = noSpaceText.match(/(?:税率|征收率).*?(13%|9%|6%|3%|1%|0%|免税|不征税)/);
-      if (taxRateMatch) {
-        tax_rate = taxRateMatch[1];
-      } else {
-        const anyPercent = noSpaceText.match(/(13|9|6|3|1|0)[%％]/);
-        if (anyPercent) tax_rate = `${anyPercent[1]}%`;
+      if (!isPdfFile) {
+        const taxRateMatch = noSpaceText.match(/(?:税率|征收率).*?(13%|9%|6%|3%|1%|0%|免税|不征税)/);
+        if (taxRateMatch) {
+          tax_rate = taxRateMatch[1];
+        } else {
+          const anyPercent = noSpaceText.match(/(13|9|6|3|1|0)[%％]/);
+          if (anyPercent) tax_rate = `${anyPercent[1]}%`;
+        }
       }
 
       // 7. Invoice Type
@@ -695,18 +787,35 @@ export default function App() {
       else if (noSpaceText.includes('通行费')) matchedKeyword = '通行费';
       else if (noSpaceText.includes('增值税') || noSpaceText.includes('电子发票') || noSpaceText.includes('普通发票') || noSpaceText.includes('专用发票') || noSpaceText.includes('数电票') || noSpaceText.includes('发票')) matchedKeyword = '其他及普票';
 
-      if (matchedKeyword) {
-        const preset = invoiceTypes.find(t => t.value.includes(matchedKeyword) || t.label.includes(matchedKeyword));
-        if (preset) {
-          invoice_type = preset.value;
-        }
+      const normalizedInvoiceNumber = (invoice_number || '').trim();
+      const labelInvoiceNumber = noSpaceText.match(/发票号码[:：]?(\d{8,24})/)?.[1] || null;
+      const first20DigitMatch = isPdfFile ? noSpaceText.match(/\d{20}/) : null;
+      const first20Digit = first20DigitMatch ? first20DigitMatch[0] : null;
+      const fallbackInvoiceNumber = isPdfFile
+        ? (labelInvoiceNumber || first20Digit)
+        : null;
+      const finalInvoiceNumber = isPdfFile
+        ? (normalizedInvoiceNumber ? normalizedInvoiceNumber : fallbackInvoiceNumber)
+        : (normalizedInvoiceNumber || null);
+      const finalYenAmounts = isPdfFile ? (noSpaceText.match(/[¥￥]\d+\.\d{2}/g) || []) : [];
+      const finalYenFirst = finalYenAmounts[0] || null;
+      const finalYenSecond = finalYenAmounts[1] || null;
+      const finalYenLast = finalYenAmounts.length > 0 ? finalYenAmounts[finalYenAmounts.length - 1] : null;
+      const yenFallbackAmount = finalYenFirst ? parseAmt(finalYenFirst.slice(1)) : null;
+      const yenFallbackTaxAmount = finalYenSecond ? parseAmt(finalYenSecond.slice(1)) : null;
+      const yenFallbackTotalAmount = finalYenLast ? parseAmt(finalYenLast.slice(1)) : null;
+      const finalAmount = amount ?? yenFallbackAmount ?? null;
+      const finalTaxAmount = tax_amount ?? yenFallbackTaxAmount ?? null;
+      const finalTotalAmount = total_amount ?? yenFallbackTotalAmount ?? null;
+      if (!finalInvoiceNumber && finalTotalAmount == null) {
+        throw new Error("未能识别到发票关键信息，请确保图片清晰或PDF格式正确。");
       }
 
       const newInvoice: Invoice = {
         raw_data: `OCR_PARSED_${Date.now()}`,
         invoice_code,
-        invoice_number,
-        amount,
+        invoice_number: finalInvoiceNumber,
+        amount: finalAmount,
         date,
         check_code,
         is_duplicate: false,
@@ -714,8 +823,8 @@ export default function App() {
         invoice_type,
         seller_company,
         tax_rate,
-        tax_amount,
-        total_amount,
+        tax_amount: finalTaxAmount,
+        total_amount: finalTotalAmount,
         reimburser: null,
         targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
         created_at: new Date().toISOString(),
