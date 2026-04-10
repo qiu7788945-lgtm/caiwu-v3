@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { Html5QrcodeScanner, Html5Qrcode } from 'html5-qrcode';
 import Tesseract from 'tesseract.js';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -671,11 +671,6 @@ export default function App() {
         if (amtMatch) amount = parseAmt(amtMatch[1]);
         const taxMatch = noSpaceText.match(/税额[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
         if (taxMatch) tax_amount = parseAmt(taxMatch[1]);
-      }
-
-      // If total is missing but we have amount and tax
-      if (!total_amount && amount !== null && tax_amount !== null) {
-        total_amount = Number((amount + tax_amount).toFixed(2));
       }
 
       if (!invoice_number && !total_amount) {
