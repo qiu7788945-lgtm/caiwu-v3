@@ -699,9 +699,6 @@ export default function App() {
         const preset = invoiceTypes.find(t => t.value.includes(matchedKeyword) || t.label.includes(matchedKeyword));
         if (preset) {
           invoice_type = preset.value;
-          if (!tax_rate && preset.taxRate) {
-            tax_rate = preset.taxRate;
-          }
         }
       }
 
