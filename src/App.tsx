@@ -629,10 +629,10 @@ export default function App() {
             const pdfAmountBlockText = pageText.slice(0, 6000);
             const pdfAmountBlockNoSpaceText = pdfAmountBlockText.replace(/\s+/g, '');
 
-            const pdfTotalMatch = pdfAmountBlockNoSpaceText.match(/价税合计(?:\(小写\)|（小写）|小写)?[^\d￥￥Y]*[￥￥Y]?(\d+[.,]\d{2})/);
+            const pdfTotalMatch = pdfAmountBlockNoSpaceText.match(/价税合计(?:\(小写\)|（小写）|小写)?[^\d¥￥Y]*[¥￥Y]?(\d+[.,]\d{2})/);
             if (pdfTotalMatch) total_amount = parseAmt(pdfTotalMatch[1]);
 
-            const pdfSumMatch = pdfAmountBlockNoSpaceText.match(/合计[^\d￥￥Y]*[￥￥Y]?(\d+[.,]\d{2})[^\d￥￥Y%]*(\d+[.,]\d{2})/);
+            const pdfSumMatch = pdfAmountBlockNoSpaceText.match(/合计[^\d¥￥Y]*[¥￥Y]?(\d+[.,]\d{2})[^\d¥￥Y%]*(\d+[.,]\d{2})/);
             if (pdfSumMatch) {
               amount = parseAmt(pdfSumMatch[1]);
               tax_amount = parseAmt(pdfSumMatch[2]);
@@ -689,7 +689,7 @@ export default function App() {
               }
             }
 
-            const allYenAmounts = noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || [];
+            const allYenAmounts = noSpaceText.match(/[¥￥]\d+\.\d{2}/g) || [];
             if ((amount === null || tax_amount === null || total_amount === null) && allYenAmounts.length >= 3) {
               const firstAmount = allYenAmounts[0];
               const secondAmount = allYenAmounts[1];
@@ -718,7 +718,7 @@ export default function App() {
             const first20Digit = first20DigitMatch ? first20DigitMatch[0] : null;
             const fallbackInvoiceNumber = labelInvoiceNumber || first20Digit;
             const finalInvoiceNumber = normalizedInvoiceNumber ? normalizedInvoiceNumber : fallbackInvoiceNumber;
-            const finalYenAmounts = noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || [];
+            const finalYenAmounts = noSpaceText.match(/[¥￥]\d+\.\d{2}/g) || [];
             const finalYenFirst = finalYenAmounts[0] || null;
             const finalYenSecond = finalYenAmounts[1] || null;
             const finalYenLast = finalYenAmounts.length > 0 ? finalYenAmounts[finalYenAmounts.length - 1] : null;
@@ -895,10 +895,10 @@ export default function App() {
         const pdfAmountBlockText = extractedText.slice(0, 6000);
         const pdfAmountBlockNoSpaceText = pdfAmountBlockText.replace(/\s+/g, '');
 
-        const pdfTotalMatch = pdfAmountBlockNoSpaceText.match(/价税合计(?:\(小写\)|（小写）|小写)?[^\d￥￥Y]*[￥￥Y]?(\d+[.,]\d{2})/);
+        const pdfTotalMatch = pdfAmountBlockNoSpaceText.match(/价税合计(?:\(小写\)|（小写）|小写)?[^\d¥￥Y]*[¥￥Y]?(\d+[.,]\d{2})/);
         if (pdfTotalMatch) total_amount = parseAmt(pdfTotalMatch[1]);
 
-        const pdfSumMatch = pdfAmountBlockNoSpaceText.match(/合计[^\d￥￥Y]*[￥￥Y]?(\d+[.,]\d{2})[^\d￥￥Y%]*(\d+[.,]\d{2})/);
+        const pdfSumMatch = pdfAmountBlockNoSpaceText.match(/合计[^\d¥￥Y]*[¥￥Y]?(\d+[.,]\d{2})[^\d¥￥Y%]*(\d+[.,]\d{2})/);
         if (pdfSumMatch) {
           amount = parseAmt(pdfSumMatch[1]);
           tax_amount = parseAmt(pdfSumMatch[2]);
@@ -955,7 +955,7 @@ export default function App() {
           }
         }
 
-        const allYenAmounts = noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || [];
+        const allYenAmounts = noSpaceText.match(/[¥￥]\d+\.\d{2}/g) || [];
         if ((amount === null || tax_amount === null || total_amount === null) && allYenAmounts.length >= 3) {
           const firstAmount = allYenAmounts[0];
           const secondAmount = allYenAmounts[1];
@@ -969,17 +969,17 @@ export default function App() {
           if (layoutTaxRateMatch) tax_rate = `${layoutTaxRateMatch[1]}%`;
         }
       } else {
-        const totalMatch = noSpaceText.match(/(?:小写|价税合计|合计金额|金额合计).*?[￥￥Y]?(\d+[.,]\d{2})/);
+        const totalMatch = noSpaceText.match(/(?:小写|价税合计|合计金额|金额合计).*?[¥￥Y]?(\d+[.,]\d{2})/);
         if (totalMatch) total_amount = parseAmt(totalMatch[1]);
 
-        const sumMatch = noSpaceText.match(/合\s*计[^\d]*[￥￥Y]?(\d+[.,]\d{2})[^\d]*[￥￥Y]?(\d+[.,]\d{2})/);
+        const sumMatch = noSpaceText.match(/合\s*计[^\d]*[¥￥Y]?(\d+[.,]\d{2})[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
         if (sumMatch) {
           amount = parseAmt(sumMatch[1]);
           tax_amount = parseAmt(sumMatch[2]);
         } else {
-          const amtMatch = noSpaceText.match(/金额[^\d]*[￥￥Y]?(\d+[.,]\d{2})/);
+          const amtMatch = noSpaceText.match(/金额[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
           if (amtMatch) amount = parseAmt(amtMatch[1]);
-          const taxMatch = noSpaceText.match(/税额[^\d]*[￥￥Y]?(\d+[.,]\d{2})/);
+          const taxMatch = noSpaceText.match(/税额[^\d]*[¥￥Y]?(\d+[.,]\d{2})/);
           if (taxMatch) tax_amount = parseAmt(taxMatch[1]);
         }
       }
@@ -1014,7 +1014,7 @@ export default function App() {
       const finalInvoiceNumber = isPdfFile
         ? (normalizedInvoiceNumber ? normalizedInvoiceNumber : fallbackInvoiceNumber)
         : (normalizedInvoiceNumber || null);
-      const finalYenAmounts = isPdfFile ? (noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || []) : [];
+      const finalYenAmounts = isPdfFile ? (noSpaceText.match(/[¥￥]\d+\.\d{2}/g) || []) : [];
       const finalYenFirst = finalYenAmounts[0] || null;
       const finalYenSecond = finalYenAmounts[1] || null;
       const finalYenLast = finalYenAmounts.length > 0 ? finalYenAmounts[finalYenAmounts.length - 1] : null;
