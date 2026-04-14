@@ -4,6 +4,8 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || 'http://127.0.0.1:18000';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const db = new Database('invoices.db');
@@ -46,6 +48,57 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+
+  app.get('/api/ocr/health', async (req, res) => {
+    try {
+      const response = await fetch(`${OCR_SERVICE_URL}/health`);
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error) {
+      console.error('OCR service unavailable:', error);
+      res.status(503).json({ ok: false, error: 'OCR service unavailable' });
+    }
+  });
+
+  app.post('/api/ocr/image', async (req, res) => {
+    try {
+      if (req.is('application/json')) {
+        const { image_base64 } = req.body || {};
+        if (!image_base64) {
+          return res.status(400).json({ ok: false, error: 'image_base64 is required' });
+        }
+
+        const formData = new FormData();
+        formData.append('image_base64', image_base64);
+
+        const response = await fetch(`${OCR_SERVICE_URL}/ocr/image`, {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await response.json();
+        return res.status(response.status).json(data);
+      }
+
+      const contentType = req.headers['content-type'] || '';
+      if (typeof contentType === 'string' && contentType.includes('multipart/form-data')) {
+        const response = await fetch(`${OCR_SERVICE_URL}/ocr/image`, {
+          method: 'POST',
+          headers: {
+            'content-type': contentType,
+          },
+          body: req as unknown as BodyInit,
+          duplex: 'half',
+        } as RequestInit & { duplex: 'half' });
+        const data = await response.json();
+        return res.status(response.status).json(data);
+      }
+
+      return res.status(400).json({ ok: false, error: 'Unsupported content type' });
+    } catch (error) {
+      console.error('OCR forwarding failed:', error);
+      return res.status(503).json({ ok: false, error: 'OCR service unavailable' });
+    }
+  });
 
   // API Routes
   app.get('/api/invoices', (req, res) => {
