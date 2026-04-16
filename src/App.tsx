@@ -9,6 +9,7 @@ import { Download, Camera, Keyboard, Trash2, AlertCircle, CheckCircle2, Upload, 
 // Initialize PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 import { format } from 'date-fns';
+import { generateMonthList } from './utils/months';
 import * as XLSX from 'xlsx';
 import { cn } from './utils/cn';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -111,22 +112,6 @@ const EditableCell = ({ value, onChange, type = "text", placeholder = "点击填
  * 生成归档月份列表（从2026年03月开始，直到当前系统月份+1个月）
  * 确保历史月份不会随时间推移而消失
  */
-const generateMonthList = () => {
-  const startYear = 2026;
-  const startMonth = 3; // 2026年03月
-  const endYear = 2028;
-  const endMonth = 3; // 2028年03月
-
-  // 计算总月数差
-  const totalMonths = (endYear - startYear) * 12 + (endMonth - startMonth) + 1; 
-  
-  const months = [];
-  for (let i = 0; i < totalMonths; i++) {
-    const d = new Date(startYear, startMonth - 1 + i, 1);
-    months.push(format(d, 'yyyy年MM月'));
-  }
-  return months; // 正序排列，2026年03月在最上面
-};
 
 export default function App() {
   const [isScanning, setIsScanning] = useState(false);
