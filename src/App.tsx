@@ -15,6 +15,7 @@ import { cn } from './utils/cn';
 import { parseQrInvoice } from './parsers/qrInvoice';
 import { parseOcrInvoice } from './parsers/ocrInvoice';
 import { parsePdfInvoice } from './parsers/pdfInvoice';
+import { createInvoiceDraft } from './services/invoiceFactory';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, type Invoice } from './db';
 import type { SearchOption, InvoiceTypeOption } from './types/invoice';
