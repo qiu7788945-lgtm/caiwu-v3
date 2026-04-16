@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { Html5QrcodeScanner, Html5Qrcode } from 'html5-qrcode';
 import Tesseract from 'tesseract.js';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -10,15 +10,10 @@ import { Download, Camera, Keyboard, Trash2, AlertCircle, CheckCircle2, Upload, 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 import { format } from 'date-fns';
 import * as XLSX from 'xlsx';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from './utils/cn';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, type Invoice } from './db';
 import { pinyin } from 'pinyin-pro';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
 
 const PRESET_COMPANIES: {label: string, value: string, search: string}[] = [];
 
@@ -2228,3 +2223,4 @@ export default function App() {
     </div>
   );
 }
+
