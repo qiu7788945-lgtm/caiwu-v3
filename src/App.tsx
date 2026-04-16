@@ -12,6 +12,7 @@ import { format } from 'date-fns';
 import { generateMonthList } from './utils/months';
 import * as XLSX from 'xlsx';
 import { cn } from './utils/cn';
+import { calculateTaxes } from './utils/tax';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, type Invoice } from './db';
 import type { SearchOption, InvoiceTypeOption } from './types/invoice';
@@ -1105,15 +1106,6 @@ export default function App() {
       }
 
       const updates: any = { [field]: finalValue };
-
-      const calculateTaxes = (totalAmount: number | null | undefined, taxRateStr: string | null | undefined) => {
-        if (totalAmount == null || taxRateStr == null) return {};
-        const rate = parseFloat(taxRateStr) / 100;
-        if (isNaN(rate)) return {};
-        const amount = Number((totalAmount / (1 + rate)).toFixed(2));
-        const tax_amount = Number((totalAmount - amount).toFixed(2));
-        return { amount, tax_amount };
-      };
 
       if (field === 'invoice_type') {
         const preset = invoiceTypes.find(t => t.value === value);
@@ -2209,5 +2201,6 @@ export default function App() {
     </div>
   );
 }
+
 
 
