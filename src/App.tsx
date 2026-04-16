@@ -12,6 +12,7 @@ import { format } from 'date-fns';
 import { generateMonthList } from './utils/months';
 import * as XLSX from 'xlsx';
 import { cn } from './utils/cn';
+import { parseQrInvoice } from './parsers/qrInvoice';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, type Invoice } from './db';
 import type { SearchOption, InvoiceTypeOption } from './types/invoice';
@@ -356,83 +357,14 @@ export default function App() {
     
     isSubmittingRef.current = true;
     try {
-      // 解析发票数据
-      // 预处理：将中文逗号替换为英文逗号，去除首尾空白
-      const normalizedData = trimmedData.replace(/，/g, ',');
-      const parts = normalizedData.split(',').map(p => p.trim());
-      
-      let invoice_type = null; // 用户要求手动选择，不自动解析或翻译
-      let invoice_code = null;
-      let invoice_number = null;
-      let parsedAmount = null;
-      let date = null;
-      let check_code = null;
-
-      // 兼容各种发票二维码格式
-      if (parts[0] === '01') {
-        // 标准格式：有 01 前缀
-        if (parts[2] && parts[2].length === 20) {
-          // 数电票格式1：01,32,20位发票号码,金额,日期,校验码
-          invoice_number = parts[2];
-          parsedAmount = parts[3];
-          date = parts[4];
-          check_code = parts[5];
-        } else if (parts[3] && parts[3].length === 20) {
-          // 数电票格式2：01,32,,20位发票号码,金额,日期,校验码 (发票代码位置为空)
-          invoice_code = parts[2] || null;
-          invoice_number = parts[3];
-          parsedAmount = parts[4];
-          date = parts[5];
-          check_code = parts[6];
-        } else {
-          // 传统发票格式：01,01,发票代码,发票号码,金额,日期,校验码
-          invoice_code = parts[2] || null;
-          invoice_number = parts[3] || null;
-          parsedAmount = parts[4];
-          date = parts[5];
-          check_code = parts[6];
-        }
-      } else if (parts[0] && parts[0].length === 20) {
-        // 无前缀数电票：20位发票号码,金额,日期,校验码
-        invoice_number = parts[0];
-        parsedAmount = parts[1];
-        date = parts[2];
-        check_code = parts[3];
-      } else if (parts[0] && (parts[0].length === 10 || parts[0].length === 12) && parts[1] && parts[1].length === 8) {
-        // 无前缀传统发票：发票代码,发票号码,金额,日期,校验码
-        invoice_code = parts[0];
-        invoice_number = parts[1];
-        parsedAmount = parts[2];
-        date = parts[3];
-        check_code = parts[4];
-      } else {
-        // 兜底策略：尝试基于正则表达式或长度猜测
-        const num20 = parts.find(p => /^\d{20}$/.test(p));
-        if (num20) {
-           invoice_number = num20;
-           const idx = parts.indexOf(num20);
-           parsedAmount = parts[idx + 1];
-           date = parts[idx + 2];
-        } else {
-           const code = parts.find(p => /^\d{10}$|^\d{12}$/.test(p));
-           const num8 = parts.find(p => /^\d{8}$/.test(p));
-           if (num8) {
-             invoice_code = code || null;
-             invoice_number = num8;
-             const idx = parts.indexOf(num8);
-             parsedAmount = parts[idx + 1];
-             date = parts[idx + 2];
-           }
-        }
-      }
-
-      // 处理金额
-      if (parsedAmount) {
-        const amt = parseFloat(parsedAmount);
-        parsedAmount = !isNaN(amt) ? Number(amt.toFixed(2)) : null;
-      } else {
-        parsedAmount = null;
-      }
+      const {
+        invoice_type,
+        invoice_code,
+        invoice_number,
+        parsedAmount,
+        date,
+        check_code,
+      } = parseQrInvoice(trimmedData);
 
       // 提取发票号码进行查重
       const finalInvoiceNumber = invoice_number || `UNKNOWN-${Date.now()}`;
