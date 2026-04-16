@@ -18,3 +18,13 @@ export interface Invoice {
   created_at: string;
   image_base64?: string | null; // 大容量字段：预留用于存储发票图片的 Base64 数据
 }
+
+export interface SearchOption {
+  label: string;
+  value: string;
+  search: string;
+}
+
+export interface InvoiceTypeOption extends SearchOption {
+  taxRate: string | null;
+}

@@ -14,6 +14,7 @@ import * as XLSX from 'xlsx';
 import { cn } from './utils/cn';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, type Invoice } from './db';
+import type { SearchOption, InvoiceTypeOption } from './types/invoice';
 import { pinyin } from 'pinyin-pro';
 
 const PRESET_COMPANIES: {label: string, value: string, search: string}[] = [];
@@ -27,7 +28,7 @@ const PRESET_INVOICE_TYPES = [
   { label: '6-其他及普票 (税率 0%)', value: '6-其他及普票', search: '6 qtjpp qitajiupupiao', taxRate: '0%' }
 ];
 
-const EditableCell = ({ value, onChange, type = "text", placeholder = "点击填写", options }: { value: any, onChange: (val: any) => void, type?: string, placeholder?: string, options?: {label: string, value: string, search: string}[] }) => {
+const EditableCell = ({ value, onChange, type = "text", placeholder = "点击填写", options }: { value: any, onChange: (val: any) => void, type?: string, placeholder?: string, options?: SearchOption[] }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [val, setVal] = useState(value || '');
   const [showDropdown, setShowDropdown] = useState(false);
@@ -146,7 +147,7 @@ export default function App() {
   const [isEditingMonths, setIsEditingMonths] = useState(false);
   const [newMonthInput, setNewMonthInput] = useState('');
 
-  const [companies, setCompanies] = useState<{label: string, value: string, search: string}[]>(() => {
+  const [companies, setCompanies] = useState<SearchOption[]>(() => {
     const saved = localStorage.getItem('invoice_companies');
     const migrated = localStorage.getItem('invoice_companies_migrated_empty');
     if (saved) {
@@ -163,7 +164,7 @@ export default function App() {
     return PRESET_COMPANIES;
   });
 
-  const [invoiceTypes, setInvoiceTypes] = useState<{label: string, value: string, search: string, taxRate: string | null}[]>(() => {
+  const [invoiceTypes, setInvoiceTypes] = useState<InvoiceTypeOption[]>(() => {
     const saved = localStorage.getItem('invoice_types');
     if (saved) {
       try { return JSON.parse(saved); } catch (e) {}
@@ -179,7 +180,7 @@ export default function App() {
     localStorage.setItem('invoice_types', JSON.stringify(invoiceTypes));
   }, [invoiceTypes]);
 
-  const [reimbursers, setReimbursers] = useState<{label: string, value: string, search: string}[]>(() => {
+  const [reimbursers, setReimbursers] = useState<SearchOption[]>(() => {
     const saved = localStorage.getItem('invoice_reimbursers');
     if (saved) {
       try { return JSON.parse(saved); } catch (e) {}
@@ -191,7 +192,7 @@ export default function App() {
     localStorage.setItem('invoice_reimbursers', JSON.stringify(reimbursers));
   }, [reimbursers]);
 
-  const [sellerCompanies, setSellerCompanies] = useState<{label: string, value: string, search: string}[]>(() => {
+  const [sellerCompanies, setSellerCompanies] = useState<SearchOption[]>(() => {
     const saved = localStorage.getItem('invoice_seller_companies');
     if (saved) {
       try { return JSON.parse(saved); } catch (e) {}
@@ -2208,4 +2209,5 @@ export default function App() {
     </div>
   );
 }
+
 
