@@ -382,25 +382,24 @@ export default function App() {
         playBeep('success');
       }
 
-      const newInvoice: Invoice = {
+      const newInvoice: Invoice = createInvoiceDraft({
         raw_data: trimmedData,
         invoice_code,
         invoice_number: finalInvoiceNumber,
-        amount: null,
-        date,
-        check_code,
-        is_duplicate,
-        buyer_company: null,
         invoice_type,
+        buyer_company: null,
         seller_company: null,
-        tax_rate: null,
+        date,
+        amount: null,
         tax_amount: null,
         total_amount: parsedAmount,
-        reimburser: null,
+        check_code,
+        tax_rate: null,
         targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
         created_at: new Date().toISOString(),
-        image_base64: imageBase64 || null
-      };
+        image_base64: imageBase64 || null,
+      });
+      newInvoice.is_duplicate = is_duplicate;
 
       // 将包含完整属性的数据真实写入 IndexedDB
       await db.invoices.add(newInvoice);
@@ -605,25 +604,23 @@ export default function App() {
               }
             }
 
-            const newInvoice: Invoice = {
+            const newInvoice: Invoice = createInvoiceDraft({
               raw_data: `OCR_PARSED_${Date.now()}_${i}`,
               invoice_code,
               invoice_number: finalInvoiceNumber ?? null,
-              amount: finalAmount,
-              date,
-              check_code,
-              is_duplicate: false,
-              buyer_company,
               invoice_type,
+              buyer_company,
               seller_company,
-              tax_rate,
+              date,
+              amount: finalAmount,
               tax_amount: finalTaxAmount,
               total_amount: finalTotalAmount,
-              reimburser: null,
+              check_code,
+              tax_rate,
               targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
               created_at: new Date().toISOString(),
-              image_base64: null
-            };
+              image_base64: null,
+            });
 
             if (newInvoice.invoice_number) {
               const existing = await db.invoices.where('invoice_number').equals(newInvoice.invoice_number).first();
@@ -850,25 +847,23 @@ export default function App() {
         }
       }
 
-      const newInvoice: Invoice = {
+      const newInvoice: Invoice = createInvoiceDraft({
         raw_data: `OCR_PARSED_${Date.now()}`,
         invoice_code,
         invoice_number: finalInvoiceNumber,
-        amount: finalAmount,
-        date,
-        check_code,
-        is_duplicate: false,
-        buyer_company,
         invoice_type,
+        buyer_company,
         seller_company,
-        tax_rate,
+        date,
+        amount: finalAmount,
         tax_amount: finalTaxAmount,
         total_amount: finalTotalAmount,
-        reimburser: null,
+        check_code,
+        tax_rate,
         targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
         created_at: new Date().toISOString(),
-        image_base64: dataUrl || null
-      };
+        image_base64: dataUrl || null,
+      });
 
       if (newInvoice.invoice_number) {
         const existing = await db.invoices.where('invoice_number').equals(newInvoice.invoice_number).first();
@@ -2043,5 +2038,8 @@ export default function App() {
     </div>
   );
 }
+
+
+
 
 
