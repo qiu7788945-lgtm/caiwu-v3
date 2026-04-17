@@ -484,13 +484,42 @@ export default function App() {
             const textContent = await page.getTextContent();
             const pageText = textContent.items.map((item: any) => item.str).join(' ');
 
-            if (!pageText.trim()) {
+            let pageTextToParse = pageText;
+            if (!pageText.trim() || pageText.replace(/\s+/g, '').length < 20) {
+              try {
+                const viewport = page.getViewport({ scale: 2 });
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                if (!context) {
+                  throw new Error('无法创建 PDF 页面渲染上下文');
+                }
+                canvas.width = Math.ceil(viewport.width);
+                canvas.height = Math.ceil(viewport.height);
+                await page.render({ canvasContext: context, viewport, canvas } as any).promise;
+                const imageBase64 = canvas.toDataURL('image/png');
+                const response = await fetch('/api/ocr/image', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({ image_base64: imageBase64 }),
+                });
+                const result = await response.json();
+                const ocrText = typeof result?.text === 'string' ? result.text.trim() : '';
+                if (response.ok && result?.ok === true && ocrText) {
+                  pageTextToParse = ocrText;
+                }
+              } catch (ocrErr) {
+              }
+            }
+
+            if (!pageTextToParse.trim()) {
               failedPages.push(`${i}(空白页)`);
               continue;
             }
 
-            const noSpaceText = pageText.replace(/\s+/g, '');
-            const parsedPdf = parsePdfInvoice(pageText);
+            const noSpaceText = pageTextToParse.replace(/\s+/g, '');
+            const parsedPdf = parsePdfInvoice(pageTextToParse);
 
             let invoice_code = parsedPdf.invoice_code;
             let invoice_number = parsedPdf.invoice_number;
@@ -2065,6 +2094,9 @@ export default function App() {
     </div>
   );
 }
+
+
+
 
 
 
