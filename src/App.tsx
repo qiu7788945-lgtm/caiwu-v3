@@ -477,6 +477,71 @@ export default function App() {
 
         const failedPages: string[] = [];
         let successCount = 0;
+        const DEBUG_PDF_OCR_FALLBACK = false;
+        const isValidPdfOcrText = (text: string) => {
+          const normalized = (text || '').replace(/\s+/g, '');
+          if (!normalized || normalized.length < 20) return false;
+          return /发票号码[:：]?\d{8,24}|开票日期[:：]?\d{4}[年\-./]\d{1,2}[月\-./]\d{1,2}|购买方|销售方|价税合计|金额|税额/.test(normalized);
+        };
+        const scorePdfOcrText = (text: string) => {
+          const normalized = (text || '').replace(/\s+/g, '');
+          let score = normalized.length;
+          if (/发票号码[:：]?\d{8,24}/.test(normalized)) score += 120;
+          if (/开票日期[:：]?\d{4}[年\-./]\d{1,2}[月\-./]\d{1,2}/.test(normalized)) score += 100;
+          if (/购买方|销售方/.test(normalized)) score += 80;
+          if (/价税合计|金额|税额/.test(normalized)) score += 60;
+          return score;
+        };
+        const renderPdfPageImage = async (page: any, rotation: number) => {
+          const viewport = page.getViewport({ scale: 3, rotation });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          if (!context) {
+            throw new Error('无法创建 PDF 页面渲染上下文');
+          }
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          await page.render({ canvasContext: context, viewport, canvas } as any).promise;
+          return canvas.toDataURL('image/png');
+        };
+        const runPdfFallbackOcr = async (page: any, pageNumber: number) => {
+          const rotations = [0, 90, 270];
+          let bestText = '';
+          let bestRotation = 0;
+          let bestScore = -1;
+
+          for (const rotation of rotations) {
+            try {
+              const imageBase64 = await renderPdfPageImage(page, rotation);
+              const response = await fetch('/api/ocr/image', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ image_base64: imageBase64 }),
+              });
+              const result = await response.json();
+              const ocrText = typeof result?.text === 'string' ? result.text.trim() : '';
+              if (DEBUG_PDF_OCR_FALLBACK) {
+                console.log('[PDF OCR fallback] page=' + pageNumber + ' rotated=' + rotation + ' textLength=' + ocrText.length);
+              }
+              const score = scorePdfOcrText(ocrText);
+              if (response.ok && result?.ok === true && score > bestScore) {
+                bestScore = score;
+                bestText = ocrText;
+                bestRotation = rotation;
+              }
+            } catch (ocrErr) {
+            }
+          }
+
+          if (DEBUG_PDF_OCR_FALLBACK) {
+            console.log('[PDF OCR chosen] page=' + pageNumber + ' chosenRotation=' + bestRotation + ' textLength=' + bestText.length);
+            console.log('[PDF OCR valid] page=' + pageNumber + ' valid=' + isValidPdfOcrText(bestText));
+          }
+
+          return isValidPdfOcrText(bestText) ? bestText : '';
+        };
 
         for (let i = 1; i <= pdf.numPages; i++) {
           try {
@@ -485,43 +550,20 @@ export default function App() {
             const pageText = textContent.items.map((item: any) => item.str).join('\n');
 
             let pageTextToParse = pageText;
-            if (!pageText.trim() || pageText.replace(/\s+/g, '').length < 20) {
-              try {
-                const viewport = page.getViewport({ scale: 2 });
-                const canvas = document.createElement('canvas');
-                const context = canvas.getContext('2d');
-                if (!context) {
-                  throw new Error('无法创建 PDF 页面渲染上下文');
-                }
-                canvas.width = Math.ceil(viewport.width);
-                canvas.height = Math.ceil(viewport.height);
-                await page.render({ canvasContext: context, viewport, canvas } as any).promise;
-                const imageBase64 = canvas.toDataURL('image/png');
-                const response = await fetch('/api/ocr/image', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({ image_base64: imageBase64 }),
-                });
-                const result = await response.json();
-                const ocrText = typeof result?.text === 'string' ? result.text.trim() : '';
-                if (response.ok && result?.ok === true && ocrText) {
-                  pageTextToParse = ocrText;
-                }
-              } catch (ocrErr) {
+            if (pageText.replace(/\s+/g, '').length < 20) {
+              const fallbackText = await runPdfFallbackOcr(page, i);
+              if (fallbackText) {
+                pageTextToParse = fallbackText;
               }
             }
 
-            if (!pageTextToParse.trim()) {
+            if (!pageTextToParse.trim() || !isValidPdfOcrText(pageTextToParse)) {
               failedPages.push(`${i}(空白页)`);
               continue;
             }
 
             const noSpaceText = pageTextToParse.replace(/\s+/g, '');
             const parsedPdf = parsePdfInvoice(pageTextToParse);
-            console.log('[PDF parsed]', { buyer_company: parsedPdf.buyer_company, seller_company: parsedPdf.seller_company });
-
             let invoice_code = parsedPdf.invoice_code;
             let invoice_number = parsedPdf.invoice_number;
             let date = parsedPdf.date;
@@ -2096,6 +2138,9 @@ export default function App() {
     </div>
   );
 }
+
+
+
 
 
 
