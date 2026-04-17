@@ -909,7 +909,34 @@ export default function App() {
         const syntheticEvent = {
           target: { files: [file] }
         } as unknown as React.ChangeEvent<HTMLInputElement>;
-        await handleOcrUpload(syntheticEvent);
+
+        try {
+          const response = await fetch('/api/ocr/image', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ image_base64: imageBase64 }),
+          });
+          const result = await response.json();
+          const paddleText = typeof result?.text === 'string' ? result.text.trim() : '';
+
+          if (response.ok && result?.ok === true && paddleText) {
+            const originalRecognize = Tesseract.recognize;
+            Tesseract.recognize = ((async () => ({
+              data: { text: paddleText }
+            })) as unknown) as typeof Tesseract.recognize;
+            try {
+              await handleOcrUpload(syntheticEvent);
+            } finally {
+              Tesseract.recognize = originalRecognize;
+            }
+          } else {
+            await handleOcrUpload(syntheticEvent);
+          }
+        } catch (ocrErr) {
+          await handleOcrUpload(syntheticEvent);
+        }
       }
             // Clear the input so the same file can be selected again
       if (fileInputRef.current) {
@@ -2038,6 +2065,8 @@ export default function App() {
     </div>
   );
 }
+
+
 
 
 
