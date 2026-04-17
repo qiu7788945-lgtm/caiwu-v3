@@ -482,7 +482,7 @@ export default function App() {
           try {
             const page = await pdf.getPage(i);
             const textContent = await page.getTextContent();
-            const pageText = textContent.items.map((item: any) => item.str).join(' ');
+            const pageText = textContent.items.map((item: any) => item.str).join('\n');
 
             let pageTextToParse = pageText;
             if (!pageText.trim() || pageText.replace(/\s+/g, '').length < 20) {
@@ -520,6 +520,7 @@ export default function App() {
 
             const noSpaceText = pageTextToParse.replace(/\s+/g, '');
             const parsedPdf = parsePdfInvoice(pageTextToParse);
+            console.log('[PDF parsed]', { buyer_company: parsedPdf.buyer_company, seller_company: parsedPdf.seller_company });
 
             let invoice_code = parsedPdf.invoice_code;
             let invoice_number = parsedPdf.invoice_number;
@@ -823,6 +824,7 @@ export default function App() {
         }
       } else {
         const parsed = parseOcrInvoice(extractedText);
+        console.log('[OCR parsed]', { buyer_company: parsed.buyer_company, seller_company: parsed.seller_company });
         invoice_code = parsed.invoice_code;
         invoice_number = parsed.invoice_number;
         date = parsed.date;
@@ -2094,6 +2096,8 @@ export default function App() {
     </div>
   );
 }
+
+
 
 
 
