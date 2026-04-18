@@ -477,7 +477,7 @@ export default function App() {
 
         const failedPages: string[] = [];
         let successCount = 0;
-        const DEBUG_PDF_OCR_FALLBACK = false;
+        const DEBUG_PDF_OCR = true;
         const isValidPdfOcrText = (text: string) => {
           const normalized = (text || '').replace(/\s+/g, '');
           if (!normalized || normalized.length < 20) return false;
@@ -509,6 +509,7 @@ export default function App() {
           let bestText = '';
           let bestRotation = 0;
           let bestScore = -1;
+          const candidateSummaries: Array<{ rotation: number; textLength: number }> = [];
 
           for (const rotation of rotations) {
             try {
@@ -522,8 +523,8 @@ export default function App() {
               });
               const result = await response.json();
               const ocrText = typeof result?.text === 'string' ? result.text.trim() : '';
-              if (DEBUG_PDF_OCR_FALLBACK) {
-                console.log('[PDF OCR fallback] page=' + pageNumber + ' rotated=' + rotation + ' textLength=' + ocrText.length);
+              if (DEBUG_PDF_OCR) {
+                candidateSummaries.push({ rotation, textLength: ocrText.length });
               }
               const score = scorePdfOcrText(ocrText);
               if (response.ok && result?.ok === true && score > bestScore) {
@@ -535,7 +536,7 @@ export default function App() {
             }
           }
 
-          if (DEBUG_PDF_OCR_FALLBACK) {
+          if (DEBUG_PDF_OCR) {
             console.log('[PDF OCR chosen] page=' + pageNumber + ' chosenRotation=' + bestRotation + ' textLength=' + bestText.length);
             console.log('[PDF OCR valid] page=' + pageNumber + ' valid=' + isValidPdfOcrText(bestText));
           }
@@ -725,13 +726,35 @@ export default function App() {
       reader.readAsDataURL(file);
       dataUrl = await base64Promise;
 
-      const result = await Tesseract.recognize(file, 'chi_sim+eng', {
-        logger: m => console.log(m)
-      });
-      const extractedText = result.data.text;
+      let extractedText = '';
+      try {
+        const response = await fetch('/api/ocr/image', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ image_base64: dataUrl }),
+        });
+        const result = await response.json();
+        const paddleText = typeof result?.text === 'string' ? result.text.trim() : '';
+        if (response.ok && paddleText.replace(/\s+/g, '').length >= 20) {
+          extractedText = paddleText;
+          console.log('[OCR source]', 'paddle');
+          console.log('[OCR raw preview]', extractedText.slice(0, 80));
+        }
+      } catch (err) {
+      }
+
+      if (!extractedText || extractedText.replace(/\s+/g, '').length < 20) {
+        const result = await Tesseract.recognize(file, 'chi_sim+eng', {
+          logger: m => console.log(m)
+        });
+        extractedText = result.data.text || '';
+        console.log('[OCR source]', 'tesseract');
+        console.log('[OCR raw preview]', extractedText.slice(0, 80));
+      }
 
       if (!extractedText) throw new Error("无法从文件中提取文本");
-
       // Parse the extracted text
       const noSpaceText = extractedText.replace(/\s+/g, '');
       const isPdfFile = file.type === 'application/pdf';
@@ -2138,6 +2161,11 @@ export default function App() {
     </div>
   );
 }
+
+
+
+
+
 
 
 

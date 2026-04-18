@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 from typing import Any
 
 import numpy as np
@@ -55,132 +54,46 @@ def rotate_image(image: Image.Image, angle: int) -> Image.Image:
     return image.rotate(-angle, expand=True)
 
 
-def _append_line(
-    lines: list[dict[str, Any]],
-    texts: list[str],
-    scores: list[float],
-    text: Any,
-    score: Any = 0.0,
-) -> None:
-    t = str(text).strip()
-    if not t:
-        return
-
-    try:
-        s = float(score)
-    except Exception:
-        s = 0.0
-
-    lines.append({"text": t, "score": s})
-    texts.append(t)
-    scores.append(s)
-
-
-def _extract_lines_from_any(
-    obj: Any,
-    lines: list[dict[str, Any]],
-    texts: list[str],
-    scores: list[float],
-) -> None:
-    """
-    兼容多种 PaddleOCR / PaddleX 返回结构：
-    1) 3.x / PaddleX 风格：dict 中含 rec_texts / rec_scores
-    2) 旧风格：[[box, [text, score]], ...]
-    3) 嵌套 list / tuple / dict / OCRResult-like 对象
-    """
-    if obj is None:
-        return
-
-    # 先处理类似 OCRResult 的对象，尝试拿 json / dict 表示
-    if not isinstance(obj, (dict, list, tuple, str, bytes, int, float, bool)):
-        # 属性 json 可能是 dict、str，或者可调用
-        if hasattr(obj, "json"):
-            try:
-                json_attr = getattr(obj, "json")
-                if callable(json_attr):
-                    data = json_attr()
-                else:
-                    data = json_attr
-
-                if isinstance(data, str):
-                    try:
-                        data = json.loads(data)
-                    except Exception:
-                        pass
-
-                _extract_lines_from_any(data, lines, texts, scores)
-                return
-            except Exception:
-                pass
-
-        # 某些对象可能有 dict / model_dump
-        for attr_name in ("dict", "model_dump"):
-            if hasattr(obj, attr_name):
-                try:
-                    fn = getattr(obj, attr_name)
-                    if callable(fn):
-                        data = fn()
-                        _extract_lines_from_any(data, lines, texts, scores)
-                        return
-                except Exception:
-                    pass
-
-    # dict 风格：优先识别 rec_texts / rec_scores
-    if isinstance(obj, dict):
-        if "rec_texts" in obj:
-            rec_texts = obj.get("rec_texts") or []
-            rec_scores = obj.get("rec_scores") or []
-            for idx, text in enumerate(rec_texts):
-                score = rec_scores[idx] if idx < len(rec_scores) else 0.0
-                _append_line(lines, texts, scores, text, score)
-            return
-
-        # 常见嵌套键，优先深入
-        for key in ("res", "result", "data", "value", "output"):
-            if key in obj:
-                _extract_lines_from_any(obj.get(key), lines, texts, scores)
-                return
-
-        # 实在不确定时，遍历 value
-        for value in obj.values():
-            _extract_lines_from_any(value, lines, texts, scores)
-        return
-
-    # list / tuple 风格
-    if isinstance(obj, (list, tuple)):
-        # 旧版标准单行： [box, [text, score]]
-        if len(obj) >= 2 and isinstance(obj[1], (list, tuple)) and len(obj[1]) >= 1:
-            rec = obj[1]
-            text = rec[0]
-            score = rec[1] if len(rec) >= 2 else 0.0
-            _append_line(lines, texts, scores, text, score)
-            return
-
-        # 其它情况就递归扫每个元素
-        for item in obj:
-            _extract_lines_from_any(item, lines, texts, scores)
-        return
-
-    # 单个字符串不直接采纳，避免把 json / 其他文本误当成 OCR 行
-    return
-
-
 def run_ocr_once(image: Image.Image, angle: int) -> dict[str, Any]:
     rotated = rotate_image(image, angle)
     img = pil_to_bgr_array(rotated)
 
-    # 这里继续用 ocr.ocr，内部会走到 predict
     result = ocr.ocr(img)
+
+    # 兼容不同返回结构
+    rows: list[Any] = []
+    if isinstance(result, list):
+        if result and isinstance(result[0], list):
+            rows = result[0]
+        else:
+            rows = result
+    elif result is None:
+        rows = []
 
     lines: list[dict[str, Any]] = []
     texts: list[str] = []
     scores: list[float] = []
 
-    # 调试：确认真实返回类型，便于后续继续排查
-    print(f"[OCR API raw type] {type(result)}")
-    print(f"[OCR API raw preview] {repr(result)[:500]}")
+    for row in rows:
+        if not row or len(row) < 2:
+            continue
 
-    _extract_lines_from_any(result, lines, texts, scores)
+        rec = row[1]
+        if not rec or len(rec) < 2:
+            continue
+
+        text = str(rec[0]).strip()
+        try:
+            score = float(rec[1])
+        except Exception:
+            score = 0.0
+
+        if not text:
+            continue
+
+        texts.append(text)
+        scores.append(score)
+        lines.append({"text": text, "score": score})
 
     avg_score = sum(scores) / len(scores) if scores else 0.0
     full_text = "\n".join(texts)

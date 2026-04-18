@@ -72,7 +72,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/ocr/image', async (req, res) => {
+    app.post('/api/ocr/image', async (req, res) => {
     try {
       const { image_base64 } = req.body ?? {};
       if (!image_base64 || typeof image_base64 !== 'string') {
@@ -90,13 +90,21 @@ async function startServer() {
         body: body.toString(),
       });
 
-      const data = await response.json();
+      const rawText = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = { ok: false, error: rawText || 'Upstream returned non-JSON response' };
+      }
+
       res.status(response.status).json(data);
     } catch (error) {
       console.error('Error proxying OCR image request:', error);
-      res.status(502).json({ ok: false, error: 'OCR proxy request failed' });
+      res.status(502).json({ ok: false, error: error instanceof Error ? error.message : 'OCR proxy request failed' });
     }
   });
+
 
   app.post('/api/invoices', (req, res) => {
     try {
