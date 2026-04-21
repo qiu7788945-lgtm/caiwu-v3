@@ -492,8 +492,8 @@ export default function App() {
           if (/价税合计|金额|税额/.test(normalized)) score += 60;
           return score;
         };
-        const renderPdfPageImage = async (page: any, rotation: number) => {
-          const viewport = page.getViewport({ scale: 3, rotation });
+        const renderPdfPageImage = async (page: any, scale: number) => {
+          const viewport = page.getViewport({ scale, rotation: 0 });
           const canvas = document.createElement('canvas');
           const context = canvas.getContext('2d');
           if (!context) {
@@ -505,15 +505,9 @@ export default function App() {
           return canvas.toDataURL('image/png');
         };
         const runPdfFallbackOcr = async (page: any, pageNumber: number) => {
-          const rotations = [0, 90, 270];
-          let bestText = '';
-          let bestRotation = 0;
-          let bestScore = -1;
-          const candidateSummaries: Array<{ rotation: number; textLength: number }> = [];
-
-          for (const rotation of rotations) {
+          const runSingleOcrAttempt = async (scale: number) => {
             try {
-              const imageBase64 = await renderPdfPageImage(page, rotation);
+              const imageBase64 = await renderPdfPageImage(page, scale);
               const response = await fetch('/api/ocr/image', {
                 method: 'POST',
                 headers: {
@@ -523,25 +517,40 @@ export default function App() {
               });
               const result = await response.json();
               const ocrText = typeof result?.text === 'string' ? result.text.trim() : '';
-              if (DEBUG_PDF_OCR) {
-                candidateSummaries.push({ rotation, textLength: ocrText.length });
-              }
-              const score = scorePdfOcrText(ocrText);
-              if (response.ok && result?.ok === true && score > bestScore) {
-                bestScore = score;
-                bestText = ocrText;
-                bestRotation = rotation;
-              }
+              return {
+                ok: response.ok && result?.ok === true,
+                text: ocrText,
+                score: scorePdfOcrText(ocrText),
+                scale,
+              };
             } catch (ocrErr) {
+              return {
+                ok: false,
+                text: '',
+                score: -1,
+                scale,
+              };
+            }
+          };
+
+          const fastAttempt = await runSingleOcrAttempt(2);
+          let bestAttempt = fastAttempt;
+
+          if (!isValidPdfOcrText(fastAttempt.text)) {
+            const slowAttempt = await runSingleOcrAttempt(3);
+            if (isValidPdfOcrText(slowAttempt.text)) {
+              bestAttempt = slowAttempt;
+            } else if (slowAttempt.score > bestAttempt.score) {
+              bestAttempt = slowAttempt;
             }
           }
 
           if (DEBUG_PDF_OCR) {
-            console.log('[PDF OCR chosen] page=' + pageNumber + ' chosenRotation=' + bestRotation + ' textLength=' + bestText.length);
-            console.log('[PDF OCR valid] page=' + pageNumber + ' valid=' + isValidPdfOcrText(bestText));
+            console.log('[PDF OCR chosen] page=' + pageNumber + ' chosenScale=' + bestAttempt.scale + ' textLength=' + bestAttempt.text.length);
+            console.log('[PDF OCR valid] page=' + pageNumber + ' valid=' + isValidPdfOcrText(bestAttempt.text));
           }
 
-          return isValidPdfOcrText(bestText) ? bestText : '';
+          return bestAttempt.ok && isValidPdfOcrText(bestAttempt.text) ? bestAttempt.text : '';
         };
 
         for (let i = 1; i <= pdf.numPages; i++) {
