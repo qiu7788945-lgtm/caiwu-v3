@@ -16,6 +16,8 @@ export interface Invoice {
   reimburser: string | null;
   targetMonth: string | null;
   created_at: string;
+  import_batch_id?: string | null;
+  source_page?: number | null;
   image_base64?: string | null; // 大容量字段：预留用于存储发票图片的 Base64 数据
 }
 

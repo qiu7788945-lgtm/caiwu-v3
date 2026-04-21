@@ -15,6 +15,8 @@ export interface InvoiceDraftInput {
   tax_rate: string | null;
   targetMonth: string | null;
   created_at: string;
+  import_batch_id?: string | null;
+  source_page?: number | null;
   image_base64?: string | null;
 }
 
@@ -38,6 +40,8 @@ export const createInvoiceDraft = (input: InvoiceDraftInput): InvoiceDraft => {
     reimburser: null,
     targetMonth: input.targetMonth,
     created_at: input.created_at,
+    import_batch_id: input.import_batch_id ?? null,
+    source_page: input.source_page ?? null,
     image_base64: input.image_base64 ?? null,
   };
 };
