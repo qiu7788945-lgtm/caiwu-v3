@@ -23,7 +23,9 @@
     },
     "files": [
       "dist/**/*",
+      "electron/**/*",
       "main.js",
+      "preload.js",
       "package.json"
     ],
     "win": {

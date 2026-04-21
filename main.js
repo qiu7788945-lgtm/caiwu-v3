@@ -1,6 +1,9 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { getStorageDatabaseInfo } from './electron/storage/database.js';
+import { registerStorageIpcHandlers } from './electron/storage/ipc.js';
+import { ensureStorageLayout } from './electron/storage/paths.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,6 +14,7 @@ function createWindow() {
     height: 800,
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: true,
       contextIsolation: false,
     },
@@ -30,6 +34,13 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  ensureStorageLayout();
+  registerStorageIpcHandlers();
+
+  const storageInfo = getStorageDatabaseInfo();
+  console.log('[storage] sqlite ready:', storageInfo.path);
+  console.log('[storage] schema version:', storageInfo.schemaVersion);
+
   createWindow();
 
   app.on('activate', function () {

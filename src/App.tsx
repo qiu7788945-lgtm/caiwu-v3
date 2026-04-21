@@ -459,6 +459,287 @@ export default function App() {
     }
   };
 
+  const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  const readFileAsBytes = async (file: File) => {
+    const arrayBuffer = await file.arrayBuffer();
+    return new Uint8Array(arrayBuffer);
+  };
+
+  const persistImageInvoiceToPrimaryStorage = async ({
+    file,
+    rawData,
+    invoice,
+  }: {
+    file: File;
+    rawData: string;
+    invoice: {
+      invoice_code: string | null;
+      invoice_number: string | null;
+      invoice_type: string | null;
+      buyer_company: string | null;
+      seller_company: string | null;
+      date: string | null;
+      amount: number | null;
+      tax_amount: number | null;
+      total_amount: number | null;
+      check_code: string | null;
+      tax_rate: string | null;
+      targetMonth: string | null;
+      created_at: string;
+      import_batch_id: string | null;
+      source_page: number | null;
+      is_duplicate: boolean;
+    };
+  }) => {
+    if (!window.invoiceStorage) {
+      return {
+        ok: false as const,
+        stage: 'bridge' as const,
+        message: '当前运行环境未提供 invoiceStorage 桥接，已跳过 SQLite 试点写入。',
+      };
+    }
+
+    let savedFile: Awaited<ReturnType<NonNullable<typeof window.invoiceStorage>['saveOriginalFile']>> | null = null;
+
+    try {
+      const fileBytes = await readFileAsBytes(file);
+      savedFile = await window.invoiceStorage.saveOriginalFile({
+        content: fileBytes,
+        originalName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        createdAt: new Date(invoice.created_at),
+      });
+    } catch (err) {
+      return {
+        ok: false as const,
+        stage: 'file' as const,
+        message: `原图落盘失败：${err instanceof Error ? err.message : '未知错误'}`,
+      };
+    }
+
+    try {
+      const sqliteRecord = await window.invoiceStorage.createInvoiceRecord({
+        invoice: {
+          raw_data: rawData,
+          invoice_code: invoice.invoice_code,
+          invoice_number: invoice.invoice_number,
+          invoice_type: invoice.invoice_type,
+          buyer_company: invoice.buyer_company,
+          seller_company: invoice.seller_company,
+          date: invoice.date,
+          amount: invoice.amount,
+          tax_amount: invoice.tax_amount,
+          total_amount: invoice.total_amount,
+          check_code: invoice.check_code,
+          tax_rate: invoice.tax_rate,
+          targetMonth: invoice.targetMonth,
+          created_at: invoice.created_at,
+          import_batch_id: invoice.import_batch_id,
+          source_page: invoice.source_page,
+          is_duplicate: invoice.is_duplicate,
+          image_base64: null,
+          primary_file_id: null,
+          original_file_path: savedFile.absolutePath,
+          preview_file_path: null,
+          thumbnail_file_path: null,
+          storage_status: 'ready',
+          storage_version: 1,
+        },
+        file: {
+          file_role: 'original',
+          file_kind: 'image',
+          original_name: file.name,
+          mime_type: file.type || 'application/octet-stream',
+          ext: savedFile.ext,
+          size_bytes: savedFile.sizeBytes,
+          relative_path: savedFile.relativePath,
+          absolute_path: savedFile.absolutePath,
+          sha256: savedFile.sha256,
+          source_page: null,
+        },
+      });
+
+      return {
+        ok: true as const,
+        savedFile,
+        sqliteRecord,
+      };
+    } catch (err) {
+      return {
+        ok: false as const,
+        stage: 'sqlite' as const,
+        message: `SQLite 写入失败：${err instanceof Error ? err.message : '未知错误'}`,
+        savedFile,
+      };
+    }
+  };
+
+  const requestLocalOcrText = async (imageBase64: string) => {
+    try {
+      const response = await fetch('/api/ocr/image', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ image_base64: imageBase64 }),
+      });
+      const result = await response.json();
+      const paddleText = typeof result?.text === 'string' ? result.text.trim() : '';
+      if (response.ok && result?.ok === true && paddleText.replace(/\s+/g, '').length >= 20) {
+        console.log('[OCR source]', 'paddle');
+        console.log('[OCR raw preview]', paddleText.slice(0, 80));
+        return paddleText;
+      }
+    } catch (err) {
+    }
+
+    return '';
+  };
+
+  const extractImageOcrText = async (file: File, imageBase64: string) => {
+    const paddleText = await requestLocalOcrText(imageBase64);
+    if (paddleText) {
+      return paddleText;
+    }
+
+    const result = await Tesseract.recognize(file, 'chi_sim+eng', {
+      logger: m => console.log(m)
+    });
+    const fallbackText = result.data.text || '';
+    console.log('[OCR source]', 'tesseract');
+    console.log('[OCR raw preview]', fallbackText.slice(0, 80));
+    return fallbackText;
+  };
+
+  const processImageOcrInvoice = async (file: File, dataUrl: string, extractedText: string) => {
+    if (!extractedText) throw new Error("无法从文件中提取文本");
+
+    const noSpaceText = extractedText.replace(/\s+/g, '');
+
+    let invoice_code = null;
+    let invoice_number = null;
+    let date = null;
+    let buyer_company = null;
+    let seller_company = null;
+    let total_amount = null;
+    let amount = null;
+    let tax_amount = null;
+    let check_code = null;
+    let invoice_type = null;
+    let tax_rate = null;
+
+    const parsed = parseOcrInvoice(extractedText);
+    console.log('[OCR parsed]', { buyer_company: parsed.buyer_company, seller_company: parsed.seller_company });
+    invoice_code = parsed.invoice_code;
+    invoice_number = parsed.invoice_number;
+    date = parsed.date;
+    buyer_company = parsed.buyer_company;
+    seller_company = parsed.seller_company;
+    total_amount = parsed.total_amount;
+    amount = parsed.amount;
+    tax_amount = parsed.tax_amount;
+    check_code = parsed.check_code;
+    tax_rate = parsed.tax_rate;
+
+    let matchedKeyword = '';
+    if (noSpaceText.includes('退票费')) matchedKeyword = '退票费';
+    else if (noSpaceText.includes('火车票') || noSpaceText.includes('铁路客票')) matchedKeyword = '火车票';
+    else if (noSpaceText.includes('飞机票') || noSpaceText.includes('航空运输电子客票行程单') || noSpaceText.includes('行程单')) matchedKeyword = '飞机票';
+    else if (noSpaceText.includes('客运服务费') || noSpaceText.includes('汽车票') || noSpaceText.includes('客运')) matchedKeyword = '客运服务费';
+    else if (noSpaceText.includes('通行费')) matchedKeyword = '通行费';
+    else if (noSpaceText.includes('增值税') || noSpaceText.includes('电子发票') || noSpaceText.includes('普通发票') || noSpaceText.includes('专用发票') || noSpaceText.includes('数电票') || noSpaceText.includes('发票')) matchedKeyword = '其他及普票';
+
+    const normalizedInvoiceNumber = (invoice_number || '').trim();
+    const finalInvoiceNumber = normalizedInvoiceNumber || null;
+    const finalAmount = amount ?? null;
+    const finalTaxAmount = tax_amount ?? null;
+    const finalTotalAmount = total_amount ?? null;
+
+    if (!finalInvoiceNumber && finalTotalAmount == null) {
+      throw new Error("未能识别到发票关键信息，请确保图片清晰或PDF格式正确。");
+    }
+
+    if (matchedKeyword) {
+      const preset = invoiceTypes.find(t => t.value.includes(matchedKeyword) || t.label.includes(matchedKeyword));
+      if (preset) {
+        invoice_type = preset.value;
+      }
+    }
+
+    const createdAt = new Date().toISOString();
+    const targetMonth = activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth;
+
+    let isDuplicate = false;
+    if (finalInvoiceNumber) {
+      const existing = await db.invoices.where('invoice_number').equals(finalInvoiceNumber).first();
+      isDuplicate = !!existing;
+    }
+
+    const primaryStorageResult = await persistImageInvoiceToPrimaryStorage({
+      file,
+      rawData: extractedText,
+      invoice: {
+        invoice_code,
+        invoice_number: finalInvoiceNumber,
+        invoice_type,
+        buyer_company,
+        seller_company,
+        date,
+        amount: finalAmount,
+        tax_amount: finalTaxAmount,
+        total_amount: finalTotalAmount,
+        check_code,
+        tax_rate,
+        targetMonth,
+        created_at: createdAt,
+        import_batch_id: null,
+        source_page: null,
+        is_duplicate: isDuplicate,
+      },
+    });
+
+    const newInvoice: Invoice = createInvoiceDraft({
+      raw_data: extractedText,
+      invoice_code,
+      invoice_number: finalInvoiceNumber,
+      invoice_type,
+      buyer_company,
+      seller_company,
+      date,
+      amount: finalAmount,
+      tax_amount: finalTaxAmount,
+      total_amount: finalTotalAmount,
+      check_code,
+      tax_rate,
+      targetMonth,
+      created_at: createdAt,
+      import_batch_id: null,
+      source_page: null,
+      image_base64: dataUrl || null,
+    });
+    newInvoice.is_duplicate = isDuplicate;
+
+    try {
+      await db.invoices.add(newInvoice);
+    } catch (err) {
+      if (primaryStorageResult.ok) {
+        throw new Error(`Dexie 兼容副本写入失败，但 SQLite 试点写入已成功。请勿重复导入。${err instanceof Error ? ` 原因：${err.message}` : ''}`);
+      }
+      throw new Error(`Dexie 兼容副本写入失败：${err instanceof Error ? err.message : '未知错误'}`);
+    }
+
+    if (!primaryStorageResult.ok) {
+      console.error('[image-ocr primary storage failed]', primaryStorageResult);
+      setError(`图片 OCR 已写入当前界面兼容存储，但新主存试点失败：${primaryStorageResult.message}`);
+    }
+  };
+
   const handleOcrUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1022,259 +1303,9 @@ export default function App() {
         return;
       }
 
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve, reject) => {
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-      });
-      reader.readAsDataURL(file);
-      dataUrl = await base64Promise;
-
-      let extractedText = '';
-      try {
-        const response = await fetch('/api/ocr/image', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ image_base64: dataUrl }),
-        });
-        const result = await response.json();
-        const paddleText = typeof result?.text === 'string' ? result.text.trim() : '';
-        if (response.ok && paddleText.replace(/\s+/g, '').length >= 20) {
-          extractedText = paddleText;
-          console.log('[OCR source]', 'paddle');
-          console.log('[OCR raw preview]', extractedText.slice(0, 80));
-        }
-      } catch (err) {
-      }
-
-      if (!extractedText || extractedText.replace(/\s+/g, '').length < 20) {
-        const result = await Tesseract.recognize(file, 'chi_sim+eng', {
-          logger: m => console.log(m)
-        });
-        extractedText = result.data.text || '';
-        console.log('[OCR source]', 'tesseract');
-        console.log('[OCR raw preview]', extractedText.slice(0, 80));
-      }
-
-      if (!extractedText) throw new Error("无法从文件中提取文本");
-      // Parse the extracted text
-      const noSpaceText = extractedText.replace(/\s+/g, '');
-      const isPdfFile = file.type === 'application/pdf';
-      const pdfHeaderText = isPdfFile ? extractedText.slice(0, 3000) : '';
-      const pdfHeaderNoSpaceText = pdfHeaderText.replace(/\s+/g, '');
-      const pdfFullText = isPdfFile ? extractedText : '';
-      
-      let invoice_code = null;
-      let invoice_number = null;
-      let date = null;
-      let buyer_company = null;
-      let seller_company = null;
-      let total_amount = null;
-      let amount = null;
-      let tax_amount = null;
-      let check_code = null;
-      let invoice_type = null;
-      let tax_rate = null;
-      
-      if (isPdfFile) {
-        const pdfInvoiceNumberMatch = pdfHeaderNoSpaceText.match(/发票号码[:：]?(\d{8,24})/);
-        if (pdfInvoiceNumberMatch) invoice_number = pdfInvoiceNumberMatch[1];
-        else {
-          const pdfInvoiceNumberFallback = noSpaceText.match(/发票号码[:：]?(\d{8,24})/)
-            || noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
-          if (pdfInvoiceNumberFallback) invoice_number = pdfInvoiceNumberFallback[1];
-        }
-
-        const codeMatch = noSpaceText.match(/(?:发票代码|代码)[:：]?(\d{10,12})/);
-        if (codeMatch) invoice_code = codeMatch[1];
-        else {
-          const fallbackCode = noSpaceText.match(/(?<!\d)(\d{10,12})(?!\d)/);
-          if (fallbackCode && fallbackCode[1] !== invoice_number) invoice_code = fallbackCode[1];
-        }
-
-        const pdfDateMatch = pdfHeaderNoSpaceText.match(/开票日期[:：]?(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})[日号]?/);
-        if (pdfDateMatch) {
-          date = `${pdfDateMatch[1]}${pdfDateMatch[2].padStart(2, '0')}${pdfDateMatch[3].padStart(2, '0')}`;
-        }
-
-        const checkCodeMatch = noSpaceText.match(/(?:校验码|机器编号)[:：]?(\d{20}|\d{16}|\d{12})/);
-        if (checkCodeMatch) check_code = checkCodeMatch[1];
-
-        const buyerBlockMatch = pdfHeaderNoSpaceText.match(/购买方信息([\s\S]{0,200}?)(?:销售方信息|项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
-        if (buyerBlockMatch) {
-          const buyerNameMatch = buyerBlockMatch[1].match(/名称[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,60}?)(?:纳税人识别号|统一社会信用代码|地址、电话|开户地址及账号|开户行及账号|电话|地址|$)/);
-          if (buyerNameMatch) buyer_company = buyerNameMatch[1];
-        }
-
-        const sellerBlockMatch = pdfHeaderNoSpaceText.match(/销售方信息([\s\S]{0,200}?)(?:项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
-        if (sellerBlockMatch) {
-          const sellerNameMatch = sellerBlockMatch[1].match(/名称[:：]?([\u4e00-\u9fa5()（）a-zA-Z0-9]{4,60}?)(?:纳税人识别号|统一社会信用代码|地址、电话|开户地址及账号|开户行及账号|电话|地址|$)/);
-          if (sellerNameMatch) seller_company = sellerNameMatch[1];
-        }
-
-        const parseAmt = (str: string) => parseFloat(str.replace(',', '.'));
-        const pdfAmountBlockText = extractedText.slice(0, 6000);
-        const pdfAmountBlockNoSpaceText = pdfAmountBlockText.replace(/\s+/g, '');
-
-        const pdfTotalMatch = pdfAmountBlockNoSpaceText.match(/价税合计(?:\(小写\)|（小写）|小写)?[^\d￥￥Y]*[￥￥Y]?(\d+[.,]\d{2})/);
-        if (pdfTotalMatch) total_amount = parseAmt(pdfTotalMatch[1]);
-
-        const pdfSumMatch = pdfAmountBlockNoSpaceText.match(/合计[^\d￥￥Y]*[￥￥Y]?(\d+[.,]\d{2})[^\d￥￥Y%]*(\d+[.,]\d{2})/);
-        if (pdfSumMatch) {
-          amount = parseAmt(pdfSumMatch[1]);
-          tax_amount = parseAmt(pdfSumMatch[2]);
-        }
-
-        const pdfTaxRateMatch = pdfAmountBlockNoSpaceText.match(/(?:税率|征收率)[:：]?\s*(13%|9%|6%|3%|1%|0%|免税|不征税)/)
-          || pdfAmountBlockNoSpaceText.match(/(13|9|6|3|1|0)[%％]/);
-        if (pdfTaxRateMatch) {
-          tax_rate = pdfTaxRateMatch[1].includes('%' ) || pdfTaxRateMatch[1] === '免税' || pdfTaxRateMatch[1] === '不征税'
-            ? pdfTaxRateMatch[1]
-            : `${pdfTaxRateMatch[1]}%`;
-        }
-
-        if (!invoice_number) {
-          const layoutInvoiceMatch = noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
-          if (layoutInvoiceMatch) invoice_number = layoutInvoiceMatch[1];
-        }
-
-        if (!date) {
-          const layoutDateMatch = noSpaceText.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
-          if (layoutDateMatch) {
-            date = `${layoutDateMatch[1]}${layoutDateMatch[2].padStart(2, '0')}${layoutDateMatch[3].padStart(2, '0')}`;
-          }
-        }
-
-        const taxIdCandidates = [...new Set((noSpaceText.match(/[A-Z0-9]{15,25}/g) || []).filter(v => /[A-Z]/.test(v) && /\d/.test(v)))];
-        const firstTaxId = taxIdCandidates[0] || '';
-        const secondTaxId = taxIdCandidates[1] || '';
-        const firstTaxIdPos = firstTaxId ? noSpaceText.indexOf(firstTaxId) : -1;
-        const secondTaxIdPos = secondTaxId ? noSpaceText.indexOf(secondTaxId, firstTaxIdPos + firstTaxId.length) : -1;
-
-        const datePos = noSpaceText.search(/\d{4}年\d{1,2}月\d{1,2}日/);
-        const companyNamePattern = /(?:[\u4e00-\u9fa5()（）a-zA-Z0-9]{2,80})(?:有限责任公司|股份有限公司|分公司|事务所|工作室|中心|公司|店|厂)/g;
-        const cleanCompanyName = (value: string) => value
-          .replace(/\d{4}年\d{1,2}月\d{1,2}日/g, '')
-          .replace(/[A-Z0-9]{15,25}/g, '')
-          .replace(/开票日期/g, '')
-          .replace(/纳税人识别号|统一社会信用代码/g, '')
-          .trim();
-
-        if (!buyer_company && datePos >= 0 && firstTaxIdPos > datePos) {
-          const buyerSection = noSpaceText.slice(datePos, firstTaxIdPos).replace(/^\d{4}年\d{1,2}月\d{1,2}日/, '');
-          const buyerCompanyMatches = [...buyerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
-          if (buyerCompanyMatches.length > 0) {
-            buyer_company = buyerCompanyMatches[buyerCompanyMatches.length - 1];
-          }
-        }
-
-        if (!seller_company && firstTaxIdPos >= 0 && secondTaxIdPos > firstTaxIdPos) {
-          const sellerSection = noSpaceText.slice(firstTaxIdPos, secondTaxIdPos).replace(/^[A-Z0-9]{15,25}/, '');
-          const sellerCompanyMatches = [...sellerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
-          if (sellerCompanyMatches.length > 0) {
-            seller_company = sellerCompanyMatches[sellerCompanyMatches.length - 1];
-          }
-        }
-
-        const allYenAmounts = noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || [];
-        if ((amount === null || tax_amount === null || total_amount === null) && allYenAmounts.length >= 3) {
-          const firstAmount = allYenAmounts[0];
-          const secondAmount = allYenAmounts[1];
-          const lastAmount = allYenAmounts[allYenAmounts.length - 1];
-          if (amount === null && firstAmount) amount = parseAmt(firstAmount.slice(1));
-          if (tax_amount === null && secondAmount) tax_amount = parseAmt(secondAmount.slice(1));
-          if (total_amount === null && lastAmount) total_amount = parseAmt(lastAmount.slice(1));
-        }
-        if (!tax_rate) {
-          const layoutTaxRateMatch = noSpaceText.match(/(13|9|6|3|1|0)%/);
-          if (layoutTaxRateMatch) tax_rate = `${layoutTaxRateMatch[1]}%`;
-        }
-      } else {
-        const parsed = parseOcrInvoice(extractedText);
-        console.log('[OCR parsed]', { buyer_company: parsed.buyer_company, seller_company: parsed.seller_company });
-        invoice_code = parsed.invoice_code;
-        invoice_number = parsed.invoice_number;
-        date = parsed.date;
-        buyer_company = parsed.buyer_company;
-        seller_company = parsed.seller_company;
-        total_amount = parsed.total_amount;
-        amount = parsed.amount;
-        tax_amount = parsed.tax_amount;
-        check_code = parsed.check_code;
-        tax_rate = parsed.tax_rate;
-      }
-
-      // 7. Invoice Type
-      let matchedKeyword = '';
-      if (noSpaceText.includes('退票费')) matchedKeyword = '退票费';
-      else if (noSpaceText.includes('火车票') || noSpaceText.includes('铁路客票')) matchedKeyword = '火车票';
-      else if (noSpaceText.includes('飞机票') || noSpaceText.includes('航空运输电子客票行程单') || noSpaceText.includes('行程单')) matchedKeyword = '飞机票';
-      else if (noSpaceText.includes('客运服务费') || noSpaceText.includes('汽车票') || noSpaceText.includes('客运')) matchedKeyword = '客运服务费';
-      else if (noSpaceText.includes('通行费')) matchedKeyword = '通行费';
-      else if (noSpaceText.includes('增值税') || noSpaceText.includes('电子发票') || noSpaceText.includes('普通发票') || noSpaceText.includes('专用发票') || noSpaceText.includes('数电票') || noSpaceText.includes('发票')) matchedKeyword = '其他及普票';
-
-      const normalizedInvoiceNumber = (invoice_number || '').trim();
-      const labelInvoiceNumber = noSpaceText.match(/发票号码[:：]?(\d{8,24})/)?.[1] || null;
-      const first20DigitMatch = isPdfFile ? noSpaceText.match(/\d{20}/) : null;
-      const first20Digit = first20DigitMatch ? first20DigitMatch[0] : null;
-      const fallbackInvoiceNumber = isPdfFile
-        ? (labelInvoiceNumber || first20Digit)
-        : null;
-      const finalInvoiceNumber = isPdfFile
-        ? (normalizedInvoiceNumber ? normalizedInvoiceNumber : fallbackInvoiceNumber)
-        : (normalizedInvoiceNumber || null);
-      const parseAmt = (str: string) => parseFloat(str.replace(',', '.'));
-      const finalYenAmounts = isPdfFile ? (noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || []) : [];
-      const finalYenFirst = finalYenAmounts[0] || null;
-      const finalYenSecond = finalYenAmounts[1] || null;
-      const finalYenLast = finalYenAmounts.length > 0 ? finalYenAmounts[finalYenAmounts.length - 1] : null;
-      const yenFallbackAmount = finalYenFirst ? parseAmt(finalYenFirst.slice(1)) : null;
-      const yenFallbackTaxAmount = finalYenSecond ? parseAmt(finalYenSecond.slice(1)) : null;
-      const yenFallbackTotalAmount = finalYenLast ? parseAmt(finalYenLast.slice(1)) : null;
-      const finalAmount = amount ?? yenFallbackAmount ?? null;
-      const finalTaxAmount = tax_amount ?? yenFallbackTaxAmount ?? null;
-      const finalTotalAmount = total_amount ?? yenFallbackTotalAmount ?? null;
-      if (!finalInvoiceNumber && finalTotalAmount == null) {
-        throw new Error("未能识别到发票关键信息，请确保图片清晰或PDF格式正确。");
-      }
-
-      if (matchedKeyword) {
-        const preset = invoiceTypes.find(t => t.value.includes(matchedKeyword) || t.label.includes(matchedKeyword));
-        if (preset) {
-          invoice_type = preset.value;
-        }
-      }
-
-      const newInvoice: Invoice = createInvoiceDraft({
-        raw_data: `OCR_PARSED_${Date.now()}`,
-        invoice_code,
-        invoice_number: finalInvoiceNumber,
-        invoice_type,
-        buyer_company,
-        seller_company,
-        date,
-        amount: finalAmount,
-        tax_amount: finalTaxAmount,
-        total_amount: finalTotalAmount,
-        check_code,
-        tax_rate,
-        targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
-        created_at: new Date().toISOString(),
-        import_batch_id: null,
-        source_page: null,
-        image_base64: dataUrl || null,
-      });
-
-      if (newInvoice.invoice_number) {
-        const existing = await db.invoices.where('invoice_number').equals(newInvoice.invoice_number).first();
-        if (existing) {
-          newInvoice.is_duplicate = true;
-        }
-      }
-
-      await db.invoices.add(newInvoice);
+      dataUrl = await readFileAsDataUrl(file);
+      const extractedText = await extractImageOcrText(file, dataUrl);
+      await processImageOcrInvoice(file, dataUrl, extractedText);
 
       if (ocrFileInputRef.current) {
         ocrFileInputRef.current.value = '';
@@ -1294,53 +1325,17 @@ export default function App() {
     setError(null);
 
     try {
-      // 读取图片为 Base64
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve, reject) => {
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-      });
-      reader.readAsDataURL(file);
-      const imageBase64 = await base64Promise;
+      const imageBase64 = await readFileAsDataUrl(file);
 
       try {
         const html5QrCode = new Html5Qrcode("reader");
         const decodedText = await html5QrCode.scanFile(file, true);
         await handleScanSubmit(decodedText, imageBase64);
       } catch (qrErr) {
-        const syntheticEvent = {
-          target: { files: [file] }
-        } as unknown as React.ChangeEvent<HTMLInputElement>;
-
-        try {
-          const response = await fetch('/api/ocr/image', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ image_base64: imageBase64 }),
-          });
-          const result = await response.json();
-          const paddleText = typeof result?.text === 'string' ? result.text.trim() : '';
-
-          if (response.ok && result?.ok === true && paddleText) {
-            const originalRecognize = Tesseract.recognize;
-            Tesseract.recognize = ((async () => ({
-              data: { text: paddleText }
-            })) as unknown) as typeof Tesseract.recognize;
-            try {
-              await handleOcrUpload(syntheticEvent);
-            } finally {
-              Tesseract.recognize = originalRecognize;
-            }
-          } else {
-            await handleOcrUpload(syntheticEvent);
-          }
-        } catch (ocrErr) {
-          await handleOcrUpload(syntheticEvent);
-        }
+        const extractedText = await extractImageOcrText(file, imageBase64);
+        await processImageOcrInvoice(file, imageBase64, extractedText);
       }
-            // Clear the input so the same file can be selected again
+      // Clear the input so the same file can be selected again
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
