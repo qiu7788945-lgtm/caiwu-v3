@@ -502,7 +502,7 @@ export default function App() {
           canvas.width = Math.ceil(viewport.width);
           canvas.height = Math.ceil(viewport.height);
           await page.render({ canvasContext: context, viewport, canvas } as any).promise;
-          return canvas.toDataURL('image/png');
+          return canvas.toDataURL('image/jpeg', 0.82);
         };
         const runPdfFallbackOcr = async (page: any, pageNumber: number) => {
           const runSingleOcrAttempt = async (scale: number) => {
