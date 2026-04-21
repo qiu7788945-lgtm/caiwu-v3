@@ -7,4 +7,6 @@ dist/
 *.log
 __pycache__/
 ocr_service/.venv/
-ocr_service/venv/
+ocr_service/venv/ocr_service/.venv311/
+.venv311/
+.venv/
