@@ -14,7 +14,15 @@ from PIL import Image
 app = FastAPI(title="Local OCR Service")
 
 # 初始化一次，避免每次请求重复加载模型
-ocr = PaddleOCR(use_textline_orientation=True, lang="ch")
+ocr = PaddleOCR(
+    text_detection_model_name="PP-OCRv5_mobile_det",
+    text_recognition_model_name="PP-OCRv5_mobile_rec",
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=True,
+    lang="ch",
+    enable_mkldnn=False,
+)
 
 
 @app.get("/health")
@@ -247,8 +255,19 @@ async def ocr_image(
         else:
             image = load_image_from_base64(final_image_base64 or "")
 
-        candidates = [run_ocr_once(image, angle) for angle in (0, 90, 180, 270)]
-        best = choose_best_result(candidates)
+        first = run_ocr_once(image, 0)
+
+        needs_fallback_angles = (
+            not first["lines"]
+            or first["text_length"] < 20
+            or first["avg_score"] < 0.80
+        )
+
+        if needs_fallback_angles:
+            candidates = [first] + [run_ocr_once(image, angle) for angle in (90, 180, 270)]
+            best = choose_best_result(candidates)
+        else:
+            best = first
 
         text_length = len((best["text"] or "").replace("\n", "").strip())
         print(f"[OCR API success] textLength={text_length}")
