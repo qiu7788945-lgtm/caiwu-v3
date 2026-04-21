@@ -397,6 +397,8 @@ export default function App() {
         tax_rate: null,
         targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
         created_at: new Date().toISOString(),
+        import_batch_id: null,
+        source_page: null,
         image_base64: imageBase64 || null,
       });
       newInvoice.is_duplicate = is_duplicate;
@@ -470,6 +472,7 @@ export default function App() {
       if (file.type === 'application/pdf') {
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const pdfImportBatchId = `PDF_IMPORT_${Date.now()}`;
 
         if (pdf.numPages > 150) {
           throw new Error('PDF 页数超过 150 页，请拆分后导入');
@@ -492,6 +495,11 @@ export default function App() {
           if (/价税合计|金额|税额/.test(normalized)) score += 60;
           return score;
         };
+        const parseAmt = (str: string) => parseFloat(
+          str
+            .replace(/[，]/g, '.')
+            .replace(/[−﹣－]/g, '-')
+        );
         const renderPdfPageImage = async (page: any, scale: number) => {
           const viewport = page.getViewport({ scale, rotation: 0 });
           const canvas = document.createElement('canvas');
@@ -503,6 +511,232 @@ export default function App() {
           canvas.height = Math.ceil(viewport.height);
           await page.render({ canvasContext: context, viewport, canvas } as any).promise;
           return canvas.toDataURL('image/jpeg', 0.82);
+        };
+        const dataUrlToFile = async (dataUrl: string, pageNumber: number) => {
+          const response = await fetch(dataUrl);
+          const blob = await response.blob();
+          return new File([blob], `pdf-page-${pageNumber}.jpg`, { type: blob.type || 'image/jpeg' });
+        };
+        const tryDecodePdfPageQr = async (imageBase64: string, pageNumber: number) => {
+          try {
+            const qrFile = await dataUrlToFile(imageBase64, pageNumber);
+            const html5QrCode = new Html5Qrcode("reader");
+            try {
+              const decodedText = await html5QrCode.scanFile(qrFile, true);
+              const parsedQr = parseQrInvoice(decodedText);
+              if (!parsedQr.invoice_number && parsedQr.parsedAmount == null && !parsedQr.date && !parsedQr.check_code) {
+                return null;
+              }
+              return parsedQr;
+            } finally {
+              try {
+                await html5QrCode.clear();
+              } catch {
+              }
+            }
+          } catch {
+            return null;
+          }
+        };
+        const isAmountTripleConsistent = (amountValue: number | null, taxValue: number | null, totalValue: number | null) => {
+          if (amountValue == null || taxValue == null || totalValue == null) return true;
+          return Math.abs(Number((amountValue + taxValue).toFixed(2)) - totalValue) <= 0.06;
+        };
+        const parseTaxRateNumber = (taxRateValue: string | null) => {
+          if (!taxRateValue || taxRateValue === '免税' || taxRateValue === '不征税') return 0;
+          const match = taxRateValue.match(/(-?\d+(?:\.\d+)?)\s*[%％]/);
+          if (!match) return null;
+          const parsed = parseFloat(match[1]);
+          return Number.isFinite(parsed) ? parsed / 100 : null;
+        };
+        const isTaxRateConsistent = (amountValue: number | null, taxValue: number | null, taxRateValue: string | null) => {
+          if (amountValue == null || taxValue == null || !taxRateValue) return true;
+          const parsedRate = parseTaxRateNumber(taxRateValue);
+          if (parsedRate == null) return true;
+          const expectedTax = Number((amountValue * parsedRate).toFixed(2));
+          return Math.abs(expectedTax - taxValue) <= 0.06;
+        };
+        const inferMissingAmountByTaxRate = (
+          amountValue: number | null,
+          taxValue: number | null,
+          totalValue: number | null,
+          taxRateValue: string | null
+        ) => {
+          if (totalValue == null || !taxRateValue) {
+            return { amount: amountValue, tax_amount: taxValue };
+          }
+
+          const parsedRate = parseTaxRateNumber(taxRateValue);
+          if (parsedRate == null) {
+            return { amount: amountValue, tax_amount: taxValue };
+          }
+
+          if (parsedRate === 0) {
+            if (amountValue == null && taxValue != null) {
+              return {
+                amount: Number((totalValue - taxValue).toFixed(2)),
+                tax_amount: taxValue,
+              };
+            }
+            if (taxValue == null && amountValue != null) {
+              return {
+                amount: amountValue,
+                tax_amount: Number((totalValue - amountValue).toFixed(2)),
+              };
+            }
+            return { amount: amountValue, tax_amount: taxValue };
+          }
+
+          if (amountValue == null && taxValue == null) {
+            const inferredAmount = Number((totalValue / (1 + parsedRate)).toFixed(2));
+            const inferredTax = Number((totalValue - inferredAmount).toFixed(2));
+            if (isAmountTripleConsistent(inferredAmount, inferredTax, totalValue) && isTaxRateConsistent(inferredAmount, inferredTax, taxRateValue)) {
+              return {
+                amount: inferredAmount,
+                tax_amount: inferredTax,
+              };
+            }
+          }
+
+          if (amountValue == null && taxValue != null) {
+            const inferredAmount = Number((taxValue / parsedRate).toFixed(2));
+            if (isAmountTripleConsistent(inferredAmount, taxValue, totalValue) && isTaxRateConsistent(inferredAmount, taxValue, taxRateValue)) {
+              return {
+                amount: inferredAmount,
+                tax_amount: taxValue,
+              };
+            }
+          }
+
+          if (taxValue == null && amountValue != null) {
+            const inferredTax = Number((amountValue * parsedRate).toFixed(2));
+            if (isAmountTripleConsistent(amountValue, inferredTax, totalValue) && isTaxRateConsistent(amountValue, inferredTax, taxRateValue)) {
+              return {
+                amount: amountValue,
+                tax_amount: inferredTax,
+              };
+            }
+          }
+
+          return { amount: amountValue, tax_amount: taxValue };
+        };
+        const normalizeAmountTriple = (
+          amountValue: number | null,
+          taxValue: number | null,
+          totalValue: number | null,
+          taxRateValue: string | null = null
+        ) => {
+          let nextAmount = amountValue;
+          let nextTax = taxValue;
+          const nextTotal = totalValue;
+
+          if (nextTax != null && nextTotal != null && Math.abs(nextTax - nextTotal) <= 0.01) {
+            if (nextAmount == null || !isAmountTripleConsistent(nextAmount, nextTax, nextTotal)) {
+              nextTax = null;
+            }
+          }
+
+          if (nextTax == null && nextTotal != null && nextAmount != null) {
+            nextTax = Number((nextTotal - nextAmount).toFixed(2));
+          }
+
+          if (nextAmount == null && nextTotal != null && nextTax != null) {
+            nextAmount = Number((nextTotal - nextTax).toFixed(2));
+          }
+
+          if (nextTotal != null && nextTotal < 0 && (nextAmount == null || nextTax == null)) {
+            const inferredNegativeTriple = inferMissingAmountByTaxRate(nextAmount, nextTax, nextTotal, taxRateValue);
+            nextAmount = inferredNegativeTriple.amount;
+            nextTax = inferredNegativeTriple.tax_amount;
+          }
+
+          if (
+            nextAmount != null
+            && nextTax != null
+            && nextTotal != null
+            && taxRateValue
+            && !isTaxRateConsistent(nextAmount, nextTax, taxRateValue)
+          ) {
+            const swappedAmount = nextTax;
+            const swappedTax = nextAmount;
+            if (
+              isAmountTripleConsistent(swappedAmount, swappedTax, nextTotal)
+              && isTaxRateConsistent(swappedAmount, swappedTax, taxRateValue)
+            ) {
+              nextAmount = swappedAmount;
+              nextTax = swappedTax;
+            }
+          }
+
+          if (nextTax != null && nextTotal != null && Math.abs(nextTax - nextTotal) <= 0.01) {
+            if (nextAmount == null || !isAmountTripleConsistent(nextAmount, nextTax, nextTotal)) {
+              nextTax = null;
+            }
+          }
+
+          if (nextTax != null && nextTotal != null && Math.abs(nextTax - nextTotal) <= 0.01) {
+            nextTax = null;
+          }
+
+          if (nextTotal != null && (nextAmount == null || nextTax == null)) {
+            const inferredTriple = inferMissingAmountByTaxRate(nextAmount, nextTax, nextTotal, taxRateValue);
+            nextAmount = inferredTriple.amount;
+            nextTax = inferredTriple.tax_amount;
+          }
+
+          return {
+            amount: nextAmount,
+            tax_amount: nextTax,
+            total_amount: nextTotal,
+          };
+        };
+        const pickBottomAmountTriplet = (text: string, taxRateValue: string | null = null) => {
+          const compact = (text || '').replace(/\s+/g, '');
+          if (!compact) return null;
+
+          const anchorCandidates = [
+            compact.lastIndexOf('价税合计'),
+            compact.lastIndexOf('小写'),
+            compact.lastIndexOf('合计'),
+          ].filter(pos => pos >= 0);
+
+          if (anchorCandidates.length === 0) return null;
+
+          const anchor = Math.max(...anchorCandidates);
+          const regionStart = Math.max(0, Math.max(anchor - 80, compact.length - 360));
+          const region = compact.slice(regionStart);
+          const totalMatch = region.match(/价税合计(?:\(小写\)|（小写）|小写)?[^\d￥¥\-−﹣－]*[￥¥]?\s*([\-−﹣－]?\d+[.,]\d{2})/);
+          const sumMatch = region.match(/合计[^\d￥¥\-−﹣－]*[￥¥]?\s*([\-−﹣－]?\d+[.,]\d{2}|\*\*\*)[\s\S]{0,24}?税额[^\d￥¥\-−﹣－]*[￥¥]?\s*([\-−﹣－]?\d+[.,]\d{2}|\*\*\*|免税|不征税)/)
+            || region.match(/金额[^\d￥¥\-−﹣－]*[￥¥]?\s*([\-−﹣－]?\d+[.,]\d{2}|\*\*\*)[\s\S]{0,24}?税额[^\d￥¥\-−﹣－]*[￥¥]?\s*([\-−﹣－]?\d+[.,]\d{2}|\*\*\*|免税|不征税)/);
+          const regionCurrencyMatches = [...region.matchAll(/[￥¥]\s*([\-−﹣－]?\d+\.\d{2})/g)].map(m => parseAmt(m[1]));
+          const regionPlainAmountMatches = [...region.matchAll(/(?<![\dA-Z])([\-−﹣－]?\d+\.\d{2})(?![\d%])/g)].map(m => parseAmt(m[1]));
+
+          let amountValue = sumMatch && !['***'].includes(sumMatch[1]) ? parseAmt(sumMatch[1]) : null;
+          let taxValue = sumMatch && !['***', '免税', '不征税'].includes(sumMatch[2]) ? parseAmt(sumMatch[2]) : null;
+          let totalValue = totalMatch ? parseAmt(totalMatch[1]) : null;
+
+          if (amountValue == null && regionCurrencyMatches.length >= 3) amountValue = regionCurrencyMatches[0];
+          if (taxValue == null && regionCurrencyMatches.length >= 2) taxValue = regionCurrencyMatches[1];
+          if (totalValue == null && regionCurrencyMatches.length >= 1) totalValue = regionCurrencyMatches[regionCurrencyMatches.length - 1];
+
+          if (amountValue == null && regionPlainAmountMatches.length >= 3) amountValue = regionPlainAmountMatches[0];
+          if (taxValue == null && regionPlainAmountMatches.length >= 2) taxValue = regionPlainAmountMatches[1];
+          if (totalValue == null && regionPlainAmountMatches.length >= 1) totalValue = regionPlainAmountMatches[regionPlainAmountMatches.length - 1];
+
+          const normalizedTriple = normalizeAmountTriple(amountValue, taxValue, totalValue, taxRateValue);
+          amountValue = normalizedTriple.amount;
+          taxValue = normalizedTriple.tax_amount;
+          totalValue = normalizedTriple.total_amount;
+
+          if (!isAmountTripleConsistent(amountValue, taxValue, totalValue)) {
+            return null;
+          }
+
+          return {
+            amount: amountValue,
+            tax_amount: taxValue,
+            total_amount: totalValue,
+          };
         };
         const runPdfFallbackOcr = async (page: any, pageNumber: number) => {
           const runSingleOcrAttempt = async (scale: number) => {
@@ -560,14 +794,25 @@ export default function App() {
             const pageText = textContent.items.map((item: any) => item.str).join('\n');
 
             let pageTextToParse = pageText;
+            let qrParsed: ReturnType<typeof parseQrInvoice> | null = null;
             if (pageText.replace(/\s+/g, '').length < 20) {
+              const qrImageBase64 = await renderPdfPageImage(page, 2);
+              qrParsed = await tryDecodePdfPageQr(qrImageBase64, i);
+
               const fallbackText = await runPdfFallbackOcr(page, i);
               if (fallbackText) {
                 pageTextToParse = fallbackText;
               }
             }
 
-            if (!pageTextToParse.trim() || !isValidPdfOcrText(pageTextToParse)) {
+            const hasTrustedQrFields = Boolean(
+              qrParsed?.invoice_number
+              || qrParsed?.parsedAmount != null
+              || qrParsed?.date
+              || qrParsed?.check_code
+            );
+
+            if (!hasTrustedQrFields && (!pageTextToParse.trim() || !isValidPdfOcrText(pageTextToParse))) {
               failedPages.push(`${i}(空白页)`);
               continue;
             }
@@ -585,8 +830,21 @@ export default function App() {
             let check_code = parsedPdf.check_code;
             let invoice_type = parsedPdf.invoice_type;
             let tax_rate = parsedPdf.tax_rate;
+            const qrInvoiceNumber = qrParsed?.invoice_number && /^\d{20}$/.test(qrParsed.invoice_number)
+              ? qrParsed.invoice_number
+              : null;
+            const qrDate = qrParsed?.date && /^\d{8}$/.test(qrParsed.date)
+              ? qrParsed.date
+              : null;
+            const qrTotalAmount = typeof qrParsed?.parsedAmount === 'number'
+              ? Number(qrParsed.parsedAmount.toFixed(2))
+              : null;
+            const qrCheckCode = qrParsed?.check_code || null;
 
-            const parseAmt = (str: string) => parseFloat(str.replace(',', '.'));
+            if (qrInvoiceNumber) invoice_number = qrInvoiceNumber;
+            if (qrDate) date = qrDate;
+            if (qrTotalAmount != null) total_amount = qrTotalAmount;
+            if (qrCheckCode) check_code = qrCheckCode;
 
             if (!invoice_number) {
               const layoutInvoiceMatch = noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
@@ -631,7 +889,7 @@ export default function App() {
               }
             }
 
-            const allYenAmounts = noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || [];
+            const allYenAmounts = noSpaceText.match(/[￥¥]\d+\.\d{2}/g) || [];
             if ((amount === null || tax_amount === null || total_amount === null) && allYenAmounts.length >= 3) {
               const firstAmount = allYenAmounts[0];
               const secondAmount = allYenAmounts[1];
@@ -655,21 +913,56 @@ export default function App() {
             else if (noSpaceText.includes('增值税') || noSpaceText.includes('电子发票') || noSpaceText.includes('普通发票') || noSpaceText.includes('专用发票') || noSpaceText.includes('数电票') || noSpaceText.includes('发票')) matchedKeyword = '其他及普票';
 
             const normalizedInvoiceNumber = (invoice_number || '').trim();
-            const labelInvoiceNumber = noSpaceText.match(/发票号码[:：]?(\d{8,24})/)?.[1] || null;
+            const labelInvoiceNumber = noSpaceText.match(/(?:发票号码|票号|号码)[:：]?(\d{20})(?!\d)/)?.[1] || null;
             const first20DigitMatch = noSpaceText.match(/\d{20}/);
             const first20Digit = first20DigitMatch ? first20DigitMatch[0] : null;
             const fallbackInvoiceNumber = labelInvoiceNumber || first20Digit;
             const finalInvoiceNumber = normalizedInvoiceNumber ? normalizedInvoiceNumber : fallbackInvoiceNumber;
-            const finalYenAmounts = noSpaceText.match(/[￥￥]\d+\.\d{2}/g) || [];
+            const finalYenAmounts = noSpaceText.match(/[￥¥]\d+\.\d{2}/g) || [];
             const finalYenFirst = finalYenAmounts[0] || null;
             const finalYenSecond = finalYenAmounts[1] || null;
             const finalYenLast = finalYenAmounts.length > 0 ? finalYenAmounts[finalYenAmounts.length - 1] : null;
             const yenFallbackAmount = finalYenFirst ? parseAmt(finalYenFirst.slice(1)) : null;
             const yenFallbackTaxAmount = finalYenSecond ? parseAmt(finalYenSecond.slice(1)) : null;
             const yenFallbackTotalAmount = finalYenLast ? parseAmt(finalYenLast.slice(1)) : null;
-            const finalAmount = amount ?? yenFallbackAmount ?? null;
-            const finalTaxAmount = tax_amount ?? yenFallbackTaxAmount ?? null;
-            const finalTotalAmount = total_amount ?? yenFallbackTotalAmount ?? null;
+            let finalAmount = amount ?? yenFallbackAmount ?? null;
+            let finalTaxAmount = tax_amount ?? yenFallbackTaxAmount ?? null;
+            let finalTotalAmount = qrTotalAmount ?? total_amount ?? yenFallbackTotalAmount ?? null;
+            const normalizedInitialTriple = normalizeAmountTriple(finalAmount, finalTaxAmount, finalTotalAmount, tax_rate);
+            finalAmount = normalizedInitialTriple.amount;
+            finalTaxAmount = normalizedInitialTriple.tax_amount;
+            finalTotalAmount = normalizedInitialTriple.total_amount;
+
+            if (
+              finalTotalAmount != null
+              && finalTotalAmount < 0
+              && (finalAmount == null || finalTaxAmount == null)
+            ) {
+              const bottomTriplet = pickBottomAmountTriplet(pageTextToParse, tax_rate);
+              if (bottomTriplet && bottomTriplet.total_amount != null && bottomTriplet.total_amount < 0) {
+                finalAmount = bottomTriplet.amount ?? finalAmount;
+                finalTaxAmount = bottomTriplet.tax_amount ?? finalTaxAmount;
+                finalTotalAmount = qrTotalAmount ?? bottomTriplet.total_amount;
+              }
+            }
+
+            if (!isAmountTripleConsistent(finalAmount, finalTaxAmount, finalTotalAmount)) {
+              const bottomTriplet = pickBottomAmountTriplet(pageTextToParse, tax_rate);
+              if (bottomTriplet) {
+                finalAmount = bottomTriplet.amount;
+                finalTaxAmount = bottomTriplet.tax_amount;
+                finalTotalAmount = qrTotalAmount ?? bottomTriplet.total_amount;
+              }
+            }
+            const normalizedFinalTriple = normalizeAmountTriple(finalAmount, finalTaxAmount, finalTotalAmount, tax_rate);
+            finalAmount = normalizedFinalTriple.amount;
+            finalTaxAmount = normalizedFinalTriple.tax_amount;
+            finalTotalAmount = normalizedFinalTriple.total_amount;
+
+            if (!isAmountTripleConsistent(finalAmount, finalTaxAmount, finalTotalAmount)) {
+              finalAmount = null;
+              finalTaxAmount = null;
+            }
 
             if (!finalInvoiceNumber && finalTotalAmount == null) {
               const reasons: string[] = [];
@@ -701,6 +994,8 @@ export default function App() {
               tax_rate,
               targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
               created_at: new Date().toISOString(),
+              import_batch_id: pdfImportBatchId,
+              source_page: i,
               image_base64: null,
             });
 
@@ -967,6 +1262,8 @@ export default function App() {
         tax_rate,
         targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
         created_at: new Date().toISOString(),
+        import_batch_id: null,
+        source_page: null,
         image_base64: dataUrl || null,
       });
 
@@ -1222,6 +1519,8 @@ export default function App() {
     }
 
     const dataToExport = selectedInvoices.map(inv => ({
+      '导入批次': inv.import_batch_id ?? '',
+      'PDF页码': inv.source_page ?? '',
       '受方公司': inv.buyer_company || '',
       '发票类型': inv.invoice_type || '',
       '发票号码': inv.invoice_number || '',
@@ -1246,8 +1545,8 @@ export default function App() {
         const cell = worksheet[cellRef];
         if (!cell) continue;
         
-        // F = 5 (开票金额), H = 7 (税额), I = 8 (价税合计)
-        if (C === 5 || C === 7 || C === 8) {
+        // G = 6 (开票金额), I = 8 (税额), J = 9 (价税合计)
+        if (C === 6 || C === 8 || C === 9) {
           if (cell.t === 'n') {
             cell.z = '0.00';
           }
@@ -1676,7 +1975,7 @@ export default function App() {
                               className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600"
                             />
                           </td>
-                          <td className="p-2 text-slate-500 text-center">{index + 1}</td>
+                          <td className="p-2 text-slate-500 text-center">{inv.source_page ?? (index + 1)}</td>
                           <td className="p-2">
                             {inv.is_duplicate ? (
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-orange-100 text-orange-700 text-[10px] font-medium truncate" title="重复">

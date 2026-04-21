@@ -36,7 +36,7 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
     if (!value) return null;
     const cleaned = value
       .replace(/^[名称:：\s]+/, '')
-      .replace(/(?:统一社会信用代码|纳税人识别号|识别号|地址、电话|开户行及账号|开户地址及账号|电话|地址).*$/, '')
+      .replace(/(?:统一社会信用代码|纳税人识别号|识别号|地址、电话|开户银行及账号|开户行及账号|开户地址及账号|开户地址|账号|电话|地址|机器编号|校验码).*$/, '')
       .replace(/[\[【]/g, '(')
       .replace(/[\]】]/g, ')')
       .replace(/徳/g, '德')
@@ -51,10 +51,12 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
 
   const headerBlacklist = new Set([
     '项目名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额', '价税合计',
-    '购买方信息', '销售方信息', '名称', '购买方', '销售方', '货物或应税劳务', '服务名称', '合计', '备注'
+    '购买方信息', '销售方信息', '名称', '购买方', '销售方', '货物或应税劳务', '服务名称', '合计', '备注',
+    '税务局', '开户银行', '账号', '开户地址', '地址', '电话', '纳税人识别号', '机器编号', '校验码'
   ]);
 
   const orgKeywordPattern = /(公司|有限公司|分公司|工作室|中心|店|局|园|馆|科技|商贸|传媒|餐饮|图文|设计|咨询|健康|药房|租赁|文化|便利店|超市)/;
+  const companyNoisePattern = /(税务局|开户银行|开户行|账号|开户地址|地址、电话|电话|纳税人识别号|统一社会信用代码|机器编号|校验码)/;
 
   const normalizeLine = (line: string) => line
     .replace(/[（【\[]/g, '(')
@@ -80,6 +82,8 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
     return Array.from(headerBlacklist).some(item => compact === item || compact.startsWith(item));
   };
 
+  const isCompanyNoiseLine = (line: string) => companyNoisePattern.test(line.replace(/\s+/g, ''));
+
   const isTaxIdLine = (line: string) => /[A-Z0-9]{15,25}/.test(line) || /(统一社会信用代码|纳税人识别号)/.test(line);
   const isAmountLine = (line: string) => /[￥¥]|\d+\.\d{2}/.test(line);
   const isCompanyLike = (line: string) => {
@@ -88,6 +92,7 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
     const compact = candidate.replace(/\s+/g, '');
     if (compact.length < 4 || compact.length > 40) return false;
     if (isHeaderLine(compact)) return false;
+    if (isCompanyNoiseLine(compact)) return false;
     if (isTaxIdLine(compact)) return false;
     if (isAmountLine(compact)) return false;
     return orgKeywordPattern.test(compact);
@@ -98,7 +103,7 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
     if (!current) return null;
     if (current.length >= 6) return current;
     const next = normalizeCompanyName(lines[index + 1] || '');
-    if (next && next.length <= 12 && !isTaxIdLine(next) && !isHeaderLine(next) && !isAmountLine(next)) {
+    if (next && next.length <= 12 && !isTaxIdLine(next) && !isHeaderLine(next) && !isCompanyNoiseLine(next) && !isAmountLine(next)) {
       const merged = normalizeCompanyName(`${current}${next}`);
       if (merged && orgKeywordPattern.test(merged)) return merged;
     }
@@ -113,6 +118,186 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
   };
 
   const findDateLineIndex = () => lines.findIndex(line => /开票日期|\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/.test(line));
+  const sectionStopPattern = /(项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|开票日期)/;
+  const buyerSectionPattern = /购买方信息|购买方/;
+  const sellerSectionPattern = /销售方信息|销售方/;
+
+  const extractCompanyNearLabel = (sourceLines: string[]) => {
+    for (let i = 0; i < sourceLines.length; i++) {
+      const line = sourceLines[i];
+      const inlineMatch = line.match(/名称\s*[:：]?\s*(.+)$/);
+      if (inlineMatch) {
+        const inlineCompany = normalizeCompanyName(inlineMatch[1]);
+        if (inlineCompany && isCompanyLike(inlineCompany)) return inlineCompany;
+      }
+
+      if (/^名称\s*[:：]?$/.test(line.replace(/\s+/g, ''))) {
+        for (let offset = 1; offset <= 2; offset++) {
+          const nextLine = sourceLines[i + offset];
+          if (!nextLine) break;
+          if (isHeaderLine(nextLine) || isCompanyNoiseLine(nextLine) || isTaxIdLine(nextLine) || isAmountLine(nextLine)) continue;
+          const candidate = normalizeCompanyName(nextLine);
+          if (candidate && isCompanyLike(candidate)) return candidate;
+        }
+      }
+    }
+    return null;
+  };
+
+  const extractSectionCompanyByLines = (sectionPattern: RegExp, exactLabelPattern?: RegExp) => {
+    for (let i = 0; i < lines.length; i++) {
+      const compact = lines[i].replace(/\s+/g, '');
+      if (!sectionPattern.test(compact)) continue;
+
+      const windowLines: string[] = [];
+      for (let j = i; j < Math.min(lines.length, i + 8); j++) {
+        const currentCompact = lines[j].replace(/\s+/g, '');
+        if (
+          j > i
+          && (
+            sectionStopPattern.test(currentCompact)
+            || (exactLabelPattern ? exactLabelPattern.test(currentCompact) : false)
+          )
+        ) break;
+        windowLines.push(lines[j]);
+      }
+
+      const labeledCompany = extractCompanyNearLabel(windowLines);
+      if (labeledCompany) return labeledCompany;
+
+      for (let k = 1; k < windowLines.length; k++) {
+        const candidate = normalizeCompanyName(windowLines[k]);
+        if (!candidate) continue;
+        if (isHeaderLine(candidate) || isCompanyNoiseLine(candidate) || isTaxIdLine(candidate) || isAmountLine(candidate)) continue;
+        if (isCompanyLike(candidate)) return candidate;
+      }
+    }
+
+    return null;
+  };
+
+  const extractCompanyFromSectionLines = (sectionPattern: RegExp, nextSectionPattern?: RegExp) => {
+    for (let i = 0; i < lines.length; i++) {
+      const compact = lines[i].replace(/\s+/g, '');
+      if (!sectionPattern.test(compact)) continue;
+
+      const windowLines: string[] = [];
+      for (let j = i; j < Math.min(lines.length, i + 10); j++) {
+        const currentLine = lines[j];
+        const currentCompact = currentLine.replace(/\s+/g, '');
+        if (
+          j > i
+          && (
+            sectionStopPattern.test(currentCompact)
+            || (nextSectionPattern ? nextSectionPattern.test(currentCompact) : false)
+          )
+        ) break;
+        windowLines.push(currentLine);
+      }
+
+      const mergedWindow = windowLines.join('').replace(/\s+/g, '');
+      const labeledMatch = mergedWindow.match(/名称[:：]?([\u4e00-\u9fa5A-Za-z0-9()（）·\-]{4,60}?)(?=纳税人识别号|统一社会信用代码|地址、电话|开户地址及账号|开户银行及账号|开户行及账号|电话|地址|机器编号|校验码|$)/);
+      if (labeledMatch) {
+        const company = normalizeCompanyName(labeledMatch[1]);
+        if (company && isCompanyLike(company)) return company;
+      }
+
+      const labeledLineCompany = extractCompanyNearLabel(windowLines);
+      if (labeledLineCompany) return labeledLineCompany;
+
+      for (let k = 0; k < windowLines.length; k++) {
+        const candidate = normalizeCompanyName(windowLines[k]);
+        if (!candidate) continue;
+        if (isHeaderLine(candidate) || isCompanyNoiseLine(candidate) || isTaxIdLine(candidate) || isAmountLine(candidate)) continue;
+        if (isCompanyLike(candidate)) return candidate;
+      }
+    }
+
+    return null;
+  };
+
+  const extractCompanyFromSectionCompactText = (sectionTitle: string, nextSectionTitle?: string) => {
+    const escapedSectionTitle = sectionTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedNextSectionTitle = nextSectionTitle ? nextSectionTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+    const boundary = nextSectionTitle
+      ? `${escapedNextSectionTitle}|项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$`
+      : '项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$';
+    const sectionMatch = normalizedText.match(new RegExp(`${escapedSectionTitle}([\\s\\S]{0,260}?)(?:${boundary})`));
+    if (!sectionMatch) return null;
+
+    const labeledMatch = sectionMatch[1].match(/名称[:：]?([\u4e00-\u9fa5A-Za-z0-9()（）·\-]{4,60}?)(?=纳税人识别号|统一社会信用代码|地址、电话|开户地址及账号|开户银行及账号|开户行及账号|电话|地址|机器编号|校验码|$)/);
+    if (!labeledMatch) return null;
+    const company = normalizeCompanyName(labeledMatch[1]);
+    return company && isCompanyLike(company) ? company : null;
+  };
+
+  const extractCompanyFromBlock = (blockText: string | undefined) => {
+    if (!blockText) return null;
+    const normalizedBlock = blockText
+      .replace(/[（【]/g, '(')
+      .replace(/[）】]/g, ')')
+      .replace(/[：]/g, ':');
+
+    const labeledNameMatch = normalizedBlock.match(/名称\s*[:：]?\s*([^\n\r]+)/);
+    if (labeledNameMatch) {
+      const labeledName = normalizeCompanyName(labeledNameMatch[1]);
+      if (labeledName && isCompanyLike(labeledName)) return labeledName;
+    }
+
+    const blockLines = normalizedBlock.split(/\r?\n/).map(normalizeLine).filter(Boolean);
+    const labeledLineCompany = extractCompanyNearLabel(blockLines);
+    if (labeledLineCompany) return labeledLineCompany;
+
+    for (const line of blockLines) {
+      if (isHeaderLine(line) || isCompanyNoiseLine(line) || isTaxIdLine(line) || isAmountLine(line)) continue;
+      const normalized = normalizeCompanyName(line);
+      if (normalized && isCompanyLike(normalized)) return normalized;
+    }
+
+    const mergedBlock = normalizedBlock.replace(/\s+/g, '');
+    const mergedMatches = mergedBlock.match(/[\u4e00-\u9fa5A-Za-z0-9()（）·\-]{4,40}?(?:有限责任公司|股份有限公司|分公司|事务所|工作室|中心|便利店|超市|药房|店|局|园|馆|科技|商贸|传媒|餐饮|图文|设计|咨询|健康|租赁|文化|公司)/g) || [];
+    for (const match of mergedMatches) {
+      const normalized = normalizeCompanyName(match);
+      if (normalized && isCompanyLike(normalized)) return normalized;
+    }
+
+    return null;
+  };
+
+  const extractCompanyFromCompactBlock = (blockText: string | undefined) => {
+    if (!blockText) return null;
+    const compactBlock = blockText
+      .replace(/[（【]/g, '(')
+      .replace(/[）】]/g, ')')
+      .replace(/[：]/g, ':')
+      .replace(/\s+/g, '');
+
+    const labeledNameMatch = compactBlock.match(/名称[:：]?([\u4e00-\u9fa5A-Za-z0-9()（）·\-]{4,60}?)(?=纳税人识别号|统一社会信用代码|地址、电话|开户地址及账号|开户银行及账号|开户行及账号|电话|地址|机器编号|校验码|$)/);
+    if (labeledNameMatch) {
+      const labeledName = normalizeCompanyName(labeledNameMatch[1]);
+      if (labeledName && isCompanyLike(labeledName)) return labeledName;
+    }
+
+    return extractCompanyFromBlock(blockText);
+  };
+
+  const extractCompaniesByBlocks = () => {
+    const buyerBlockMatch = rawText.match(/购买方信息([\s\S]{0,240}?)(?:销售方信息|项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
+    const sellerBlockMatch = rawText.match(/销售方信息([\s\S]{0,240}?)(?:项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
+    const compactBuyerBlockMatch = normalizedText.match(/购买方信息([\s\S]{0,240}?)(?:销售方信息|项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
+    const compactSellerBlockMatch = normalizedText.match(/销售方信息([\s\S]{0,240}?)(?:项目名称|货物或应税劳务|服务名称|规格型号|单位|数量|单价|金额|税额|价税合计|备注|$)/);
+    const buyerCompactSection = extractCompanyFromSectionCompactText('购买方信息', '销售方信息');
+    const sellerCompactSection = extractCompanyFromSectionCompactText('销售方信息');
+    const buyerLineSection = extractCompanyFromSectionLines(buyerSectionPattern, sellerSectionPattern);
+    const sellerLineSection = extractCompanyFromSectionLines(sellerSectionPattern);
+    const buyerNearSection = extractSectionCompanyByLines(buyerSectionPattern, sellerSectionPattern);
+    const sellerNearSection = extractSectionCompanyByLines(sellerSectionPattern);
+
+    return {
+      buyer: buyerCompactSection || extractCompanyFromCompactBlock(compactBuyerBlockMatch?.[1]) || extractCompanyFromBlock(buyerBlockMatch?.[1]) || buyerLineSection || buyerNearSection,
+      seller: sellerCompactSection || extractCompanyFromCompactBlock(compactSellerBlockMatch?.[1]) || extractCompanyFromBlock(sellerBlockMatch?.[1]) || sellerLineSection || sellerNearSection,
+    };
+  };
 
   const extractCompaniesByLines = () => {
     let buyer: string | null = null;
@@ -164,13 +349,14 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
     return { buyer, seller };
   };
 
+  const blockCompanies = extractCompaniesByBlocks();
   const lineCompanies = extractCompaniesByLines();
 
   const invoiceCodeMatch = noSpaceText.match(/(?:发票代码|代码)\s*[:：]?\s*(\d{10,12})/)
     || noSpaceText.match(/(?<!\d)(\d{10,12})(?!\d)/);
 
-  const invoiceNumberMatch = noSpaceText.match(/发票号码\s*[:：]?\s*(\d{8,24})/)
-    || compactText.match(/发票号码\s*[:：]?\s*(\d{8,24})/)
+  const invoiceNumberMatch = noSpaceText.match(/(?:发票号码|票号|号码)\s*[:：]?\s*(\d{20})(?!\d)/)
+    || compactText.match(/(?:发票号码|票号|号码)\s*[:：]?\s*(\d{20})(?!\d)/)
     || noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
 
   const dateMatch = normalizedText.match(/开票日期\s*[:：]?\s*(\d{4})\s*[年\-./]\s*(\d{1,2})\s*[月\-./]\s*(\d{1,2})\s*[日号]?/)
@@ -178,8 +364,8 @@ export const parsePdfInvoice = (text: string): ParsedPdfInvoice => {
 
   const checkCodeMatch = noSpaceText.match(/(?:校验码|机器编号)\s*[:：]?\s*(\d{12,20})/);
 
-  const buyer_company = lineCompanies.buyer;
-  const seller_company = lineCompanies.seller;
+  const buyer_company = blockCompanies.buyer || lineCompanies.buyer;
+  const seller_company = blockCompanies.seller || lineCompanies.seller;
 
   if (DEBUG_INVOICE_PARSE) {
     console.log('[PDF normalized lines]', lines.slice(0, 20));
