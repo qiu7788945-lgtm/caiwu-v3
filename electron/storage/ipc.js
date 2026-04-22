@@ -1,7 +1,25 @@
 import { ipcMain, shell } from 'electron';
 import path from 'path';
-import { getStorageDatabaseInfo, getStorageDb } from './database.js';
-import { getStoragePlanningSnapshot, getStorageUsageSummary, saveOriginalFile } from './files.js';
+import {
+  detectInvoiceDuplicate,
+  getStorageDatabaseInfo,
+  getStorageDb,
+  optimizeStorageDatabase,
+} from './database.js';
+import {
+  clearStorageCache,
+  getStoragePlanningSnapshot,
+  getStorageUsageSummary,
+  resolveStorageOpenTarget,
+  saveOriginalFile,
+} from './files.js';
+import {
+  getLegacySyncStatus,
+  pauseLegacySync,
+  runLegacySyncBatch,
+  resumeLegacySync,
+  startLegacySync,
+} from './migration.js';
 import { ensureStorageLayout, getStoragePaths } from './paths.js';
 
 let registered = false;
@@ -49,21 +67,68 @@ export function registerStorageIpcHandlers() {
   });
 
   ipcMain.handle('storage:get-summary', async () => {
+    const usage = getStorageUsageSummary();
+    const database = getStorageDatabaseInfo();
     return {
-      database: getStorageDatabaseInfo(),
-      usage: getStorageUsageSummary(),
+      paths: usage.paths,
+      sizes: usage.sizes,
+      counts: {
+        ...usage.counts,
+        dbInvoiceCount: database.invoiceCount,
+        dbFileCount: database.fileCount,
+      },
+      database,
     };
   });
 
   ipcMain.handle('storage:open-root', async () => {
-    const paths = getStoragePaths();
-    const target = paths.storageRoot;
-    const errorMessage = await shell.openPath(target);
+    const resolved = resolveStorageOpenTarget('root');
+    const errorMessage = await shell.openPath(resolved.absolutePath);
     return {
       ok: errorMessage === '',
-      target,
+      target: resolved.target,
+      absolutePath: resolved.absolutePath,
       error: errorMessage || null,
     };
+  });
+
+  ipcMain.handle('storage:open-path', async (_event, target = 'root') => {
+    const resolved = resolveStorageOpenTarget(target);
+    const errorMessage = await shell.openPath(resolved.absolutePath);
+    return {
+      ok: errorMessage === '',
+      target: resolved.target,
+      absolutePath: resolved.absolutePath,
+      error: errorMessage || null,
+    };
+  });
+
+  ipcMain.handle('storage:clear-cache', async (_event, action) => {
+    return clearStorageCache(action);
+  });
+
+  ipcMain.handle('storage:optimize-database', async (_event, options) => {
+    return optimizeStorageDatabase(options ?? {});
+  });
+
+  ipcMain.handle('migration:get-status', async (_event, options) => {
+    return getLegacySyncStatus(options?.taskKey);
+  });
+
+  ipcMain.handle('migration:start-legacy-sync', async (_event, options) => {
+    return startLegacySync(options ?? {});
+  });
+
+  ipcMain.handle('migration:pause-legacy-sync', async (_event, options) => {
+    return pauseLegacySync(options ?? {});
+  });
+
+  ipcMain.handle('migration:resume-legacy-sync', async (_event, options) => {
+    return resumeLegacySync(options ?? {});
+  });
+
+  ipcMain.handle('migration:run-legacy-sync-batch', async (_event, payload) => {
+    return runLegacySyncBatch(payload ?? {});
   });
 
   ipcMain.handle('storage:save-original-file', async (_event, payload) => {
@@ -78,6 +143,14 @@ export function registerStorageIpcHandlers() {
     const db = getStorageDb();
     const invoice = normalizeInvoicePayload(payload?.invoice);
     const file = payload?.file ?? null;
+    const duplicateCheck = detectInvoiceDuplicate(db, invoice.invoice_number);
+    const invoiceToInsert = {
+      ...invoice,
+      invoice_number: duplicateCheck.matchedInvoiceNumber ?? invoice.invoice_number,
+      is_duplicate: duplicateCheck.evaluated
+        ? (duplicateCheck.duplicateDetected ? 1 : 0)
+        : invoice.is_duplicate,
+    };
 
     const insertInvoice = db.prepare(`
       INSERT INTO invoices (
@@ -173,7 +246,7 @@ export function registerStorageIpcHandlers() {
     const selectFile = db.prepare('SELECT * FROM files WHERE id = ?');
 
     const tx = db.transaction(() => {
-      const invoiceResult = insertInvoice.run(invoice);
+      const invoiceResult = insertInvoice.run(invoiceToInsert);
       const invoiceId = Number(invoiceResult.lastInsertRowid);
       let fileRow = null;
 
@@ -199,6 +272,9 @@ export function registerStorageIpcHandlers() {
       return {
         invoice: selectInvoice.get(invoiceId),
         file: fileRow,
+        duplicateCheck,
+        duplicateDetected: duplicateCheck.duplicateDetected,
+        existingDuplicateInvoiceId: duplicateCheck.existingInvoiceId,
       };
     });
 

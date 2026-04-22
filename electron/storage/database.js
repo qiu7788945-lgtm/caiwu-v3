@@ -113,26 +113,64 @@ function runMigrations(db) {
       last_accessed_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS legacy_sync_tasks (
+      task_key TEXT PRIMARY KEY,
+      phase TEXT NOT NULL DEFAULT 'bootstrap',
+      status TEXT NOT NULL DEFAULT 'idle',
+      total_records INTEGER NOT NULL DEFAULT 0,
+      processed_records INTEGER NOT NULL DEFAULT 0,
+      success_records INTEGER NOT NULL DEFAULT 0,
+      failed_records INTEGER NOT NULL DEFAULT 0,
+      skipped_records INTEGER NOT NULL DEFAULT 0,
+      last_cursor TEXT,
+      last_id INTEGER,
+      started_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      finished_at TEXT,
+      last_error TEXT,
+      config_json TEXT,
+      summary_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS legacy_sync_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_key TEXT NOT NULL,
+      legacy_source TEXT NOT NULL DEFAULT 'dexie',
+      legacy_id INTEGER NOT NULL,
+      sqlite_invoice_id INTEGER,
+      status TEXT NOT NULL,
+      skip_reason TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(task_key, legacy_source, legacy_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_invoices_invoice_number ON invoices(invoice_number);
     CREATE INDEX IF NOT EXISTS idx_invoices_target_month ON invoices(targetMonth);
     CREATE INDEX IF NOT EXISTS idx_invoices_created_at ON invoices(created_at);
     CREATE INDEX IF NOT EXISTS idx_files_invoice_id ON files(invoice_id);
     CREATE INDEX IF NOT EXISTS idx_files_role ON files(file_role);
     CREATE INDEX IF NOT EXISTS idx_cache_entries_type ON cache_entries(cache_type);
+    CREATE INDEX IF NOT EXISTS idx_legacy_sync_items_legacy_id ON legacy_sync_items(legacy_source, legacy_id);
+    CREATE INDEX IF NOT EXISTS idx_legacy_sync_items_status ON legacy_sync_items(status);
   `);
 
   ensureLegacyInvoicesCompatibility(db);
 
-  const migrationVersion = 1;
-  const hasMigration = db
-    .prepare('SELECT version FROM migrations WHERE version = ?')
-    .get(migrationVersion);
+  const applyMigration = (version, name, metaValue) => {
+    const hasMigration = db
+      .prepare('SELECT version FROM migrations WHERE version = ?')
+      .get(version);
 
-  if (!hasMigration) {
+    if (hasMigration) {
+      return;
+    }
+
     const now = new Date().toISOString();
     db.prepare(
       'INSERT INTO migrations (version, name, applied_at) VALUES (?, ?, ?)'
-    ).run(migrationVersion, 'phase1_storage_foundation', now);
+    ).run(version, name, now);
 
     db.prepare(`
       INSERT INTO app_meta (key, value, updated_at)
@@ -142,10 +180,14 @@ function runMigrations(db) {
         updated_at = excluded.updated_at
     `).run({
       key: 'storage_schema_version',
-      value: String(migrationVersion),
+      value: String(metaValue),
       updated_at: now,
     });
-  }
+  };
+
+  applyMigration(1, 'phase1_storage_foundation', 1);
+  applyMigration(2, 'phase4_legacy_sync_foundation', 2);
+  applyMigration(3, 'phase4_legacy_sync_idempotency', 3);
 }
 
 export function getStorageDb() {
@@ -186,4 +228,256 @@ export function getStorageDatabaseInfo() {
     invoiceCount: invoiceCountRow?.count ?? 0,
     fileCount: fileCountRow?.count ?? 0,
   };
+}
+
+export function optimizeStorageDatabase(options = {}) {
+  const db = getStorageDb();
+  const paths = ensureStorageLayout();
+  const beforeBytes = fs.existsSync(paths.databaseFile)
+    ? fs.statSync(paths.databaseFile).size
+    : 0;
+  const runAnalyze = options.analyze !== false;
+
+  db.pragma('optimize');
+  db.exec('VACUUM');
+
+  if (runAnalyze) {
+    db.exec('ANALYZE');
+  }
+
+  const afterBytes = fs.existsSync(paths.databaseFile)
+    ? fs.statSync(paths.databaseFile).size
+    : 0;
+
+  return {
+    ok: true,
+    operation: 'vacuum',
+    analyzeExecuted: runAnalyze,
+    beforeBytes,
+    afterBytes,
+    bytesReclaimed: Math.max(0, beforeBytes - afterBytes),
+    databasePath: paths.databaseFile,
+  };
+}
+
+export function normalizeInvoiceNumberForDuplicateCheck(invoiceNumber) {
+  if (typeof invoiceNumber !== 'string') {
+    return null;
+  }
+
+  const normalized = invoiceNumber.trim();
+  if (!normalized || /^UNKNOWN-/i.test(normalized)) {
+    return null;
+  }
+
+  if (/^\d{20}$/.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^\d{8}$/.test(normalized)) {
+    return normalized;
+  }
+
+  return null;
+}
+
+export function detectInvoiceDuplicate(db, invoiceNumber) {
+  const normalizedInvoiceNumber = normalizeInvoiceNumberForDuplicateCheck(invoiceNumber);
+
+  if (!normalizedInvoiceNumber) {
+    return {
+      evaluated: false,
+      duplicateDetected: false,
+      existingInvoiceId: null,
+      matchedInvoiceNumber: null,
+      strategy: 'skipped_invalid_invoice_number',
+    };
+  }
+
+  const existingInvoice = db
+    .prepare(`
+      SELECT id, invoice_number, created_at
+      FROM invoices
+      WHERE invoice_number = ?
+      ORDER BY id ASC
+      LIMIT 1
+    `)
+    .get(normalizedInvoiceNumber);
+
+  return {
+    evaluated: true,
+    duplicateDetected: Boolean(existingInvoice),
+    existingInvoiceId: existingInvoice ? Number(existingInvoice.id) : null,
+    matchedInvoiceNumber: normalizedInvoiceNumber,
+    strategy: 'invoice_number',
+  };
+}
+
+export function getLegacySyncTaskRow(taskKey = 'legacy_dexie_to_sqlite') {
+  const db = getStorageDb();
+  return db
+    .prepare(`
+      SELECT
+        task_key,
+        phase,
+        status,
+        total_records,
+        processed_records,
+        success_records,
+        failed_records,
+        skipped_records,
+        last_cursor,
+        last_id,
+        started_at,
+        updated_at,
+        finished_at,
+        last_error,
+        config_json,
+        summary_json
+      FROM legacy_sync_tasks
+      WHERE task_key = ?
+    `)
+    .get(taskKey);
+}
+
+export function upsertLegacySyncTask(task) {
+  const db = getStorageDb();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO legacy_sync_tasks (
+      task_key,
+      phase,
+      status,
+      total_records,
+      processed_records,
+      success_records,
+      failed_records,
+      skipped_records,
+      last_cursor,
+      last_id,
+      started_at,
+      updated_at,
+      finished_at,
+      last_error,
+      config_json,
+      summary_json
+    ) VALUES (
+      @task_key,
+      @phase,
+      @status,
+      @total_records,
+      @processed_records,
+      @success_records,
+      @failed_records,
+      @skipped_records,
+      @last_cursor,
+      @last_id,
+      @started_at,
+      @updated_at,
+      @finished_at,
+      @last_error,
+      @config_json,
+      @summary_json
+    )
+    ON CONFLICT(task_key) DO UPDATE SET
+      phase = excluded.phase,
+      status = excluded.status,
+      total_records = excluded.total_records,
+      processed_records = excluded.processed_records,
+      success_records = excluded.success_records,
+      failed_records = excluded.failed_records,
+      skipped_records = excluded.skipped_records,
+      last_cursor = excluded.last_cursor,
+      last_id = excluded.last_id,
+      started_at = excluded.started_at,
+      updated_at = excluded.updated_at,
+      finished_at = excluded.finished_at,
+      last_error = excluded.last_error,
+      config_json = excluded.config_json,
+      summary_json = excluded.summary_json
+  `).run({
+    task_key: task.task_key,
+    phase: task.phase ?? 'bootstrap',
+    status: task.status ?? 'idle',
+    total_records: task.total_records ?? 0,
+    processed_records: task.processed_records ?? 0,
+    success_records: task.success_records ?? 0,
+    failed_records: task.failed_records ?? 0,
+    skipped_records: task.skipped_records ?? 0,
+    last_cursor: task.last_cursor ?? null,
+    last_id: task.last_id ?? null,
+    started_at: task.started_at ?? null,
+    updated_at: task.updated_at ?? now,
+    finished_at: task.finished_at ?? null,
+    last_error: task.last_error ?? null,
+    config_json: task.config_json ?? null,
+    summary_json: task.summary_json ?? null,
+  });
+
+  return getLegacySyncTaskRow(task.task_key);
+}
+
+export function getLegacySyncItem(taskKey, legacySource, legacyId) {
+  const db = getStorageDb();
+  return db.prepare(`
+    SELECT
+      id,
+      task_key,
+      legacy_source,
+      legacy_id,
+      sqlite_invoice_id,
+      status,
+      skip_reason,
+      last_error,
+      created_at,
+      updated_at
+    FROM legacy_sync_items
+    WHERE task_key = ? AND legacy_source = ? AND legacy_id = ?
+  `).get(taskKey, legacySource, legacyId);
+}
+
+export function upsertLegacySyncItem(item) {
+  const db = getStorageDb();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO legacy_sync_items (
+      task_key,
+      legacy_source,
+      legacy_id,
+      sqlite_invoice_id,
+      status,
+      skip_reason,
+      last_error,
+      created_at,
+      updated_at
+    ) VALUES (
+      @task_key,
+      @legacy_source,
+      @legacy_id,
+      @sqlite_invoice_id,
+      @status,
+      @skip_reason,
+      @last_error,
+      @created_at,
+      @updated_at
+    )
+    ON CONFLICT(task_key, legacy_source, legacy_id) DO UPDATE SET
+      sqlite_invoice_id = excluded.sqlite_invoice_id,
+      status = excluded.status,
+      skip_reason = excluded.skip_reason,
+      last_error = excluded.last_error,
+      updated_at = excluded.updated_at
+  `).run({
+    task_key: item.task_key,
+    legacy_source: item.legacy_source ?? 'dexie',
+    legacy_id: item.legacy_id,
+    sqlite_invoice_id: item.sqlite_invoice_id ?? null,
+    status: item.status,
+    skip_reason: item.skip_reason ?? null,
+    last_error: item.last_error ?? null,
+    created_at: item.created_at ?? now,
+    updated_at: item.updated_at ?? now,
+  });
+
+  return getLegacySyncItem(item.task_key, item.legacy_source ?? 'dexie', item.legacy_id);
 }

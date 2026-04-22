@@ -55,6 +55,72 @@ function walkDirSize(targetDir) {
     .reduce((total, entry) => total + walkDirSize(path.join(targetDir, entry.name)), 0);
 }
 
+function scanDirStats(targetDir) {
+  if (!fs.existsSync(targetDir)) {
+    return { bytes: 0, files: 0, directories: 0 };
+  }
+
+  const stat = fs.statSync(targetDir);
+  if (stat.isFile()) {
+    return { bytes: stat.size, files: 1, directories: 0 };
+  }
+
+  return fs.readdirSync(targetDir, { withFileTypes: true }).reduce(
+    (acc, entry) => {
+      const entryPath = path.join(targetDir, entry.name);
+      if (entry.isDirectory()) {
+        const nested = scanDirStats(entryPath);
+        acc.bytes += nested.bytes;
+        acc.files += nested.files;
+        acc.directories += nested.directories + 1;
+      } else {
+        const entryStat = fs.statSync(entryPath);
+        acc.bytes += entryStat.size;
+        acc.files += 1;
+      }
+      return acc;
+    },
+    { bytes: 0, files: 0, directories: 0 }
+  );
+}
+
+function removeDirContents(targetDir) {
+  const result = {
+    deletedFiles: 0,
+    deletedBytes: 0,
+    errors: [],
+  };
+
+  if (!fs.existsSync(targetDir)) {
+    return result;
+  }
+
+  const removeEntry = (entryPath) => {
+    try {
+      const stat = fs.statSync(entryPath);
+      if (stat.isDirectory()) {
+        for (const entry of fs.readdirSync(entryPath, { withFileTypes: true })) {
+          removeEntry(path.join(entryPath, entry.name));
+        }
+        fs.rmSync(entryPath, { recursive: false, force: true });
+        return;
+      }
+
+      result.deletedBytes += stat.size;
+      result.deletedFiles += 1;
+      fs.rmSync(entryPath, { force: true });
+    } catch (err) {
+      result.errors.push(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  for (const entry of fs.readdirSync(targetDir, { withFileTypes: true })) {
+    removeEntry(path.join(targetDir, entry.name));
+  }
+
+  return result;
+}
+
 export function saveOriginalFile({
   content,
   originalName,
@@ -84,32 +150,51 @@ export function getStorageUsageSummary() {
   const databaseSize = fs.existsSync(paths.databaseFile)
     ? fs.statSync(paths.databaseFile).size
     : 0;
-
-  const originalsSize = walkDirSize(paths.originalsRoot);
-  const previewsSize = walkDirSize(paths.previewsRoot);
-  const thumbnailsSize = walkDirSize(paths.thumbnailsRoot);
-  const ocrTempSize = walkDirSize(paths.ocrTempRoot);
-  const exportTempSize = walkDirSize(paths.exportTempRoot);
-  const logsSize = walkDirSize(paths.logsRoot);
+  const originalsStats = scanDirStats(paths.originalsRoot);
+  const previewsStats = scanDirStats(paths.previewsRoot);
+  const thumbnailsStats = scanDirStats(paths.thumbnailsRoot);
+  const ocrTempStats = scanDirStats(paths.ocrTempRoot);
+  const exportTempStats = scanDirStats(paths.exportTempRoot);
+  const logsStats = scanDirStats(paths.logsRoot);
 
   return {
     paths,
     sizes: {
       database: databaseSize,
-      originals: originalsSize,
-      previews: previewsSize,
-      thumbnails: thumbnailsSize,
-      ocrTemp: ocrTempSize,
-      exportTemp: exportTempSize,
-      logs: logsSize,
+      originals: originalsStats.bytes,
+      previews: previewsStats.bytes,
+      thumbnails: thumbnailsStats.bytes,
+      ocrTemp: ocrTempStats.bytes,
+      exportTemp: exportTempStats.bytes,
+      logs: logsStats.bytes,
       total:
         databaseSize +
-        originalsSize +
-        previewsSize +
-        thumbnailsSize +
-        ocrTempSize +
-        exportTempSize +
-        logsSize,
+        originalsStats.bytes +
+        previewsStats.bytes +
+        thumbnailsStats.bytes +
+        ocrTempStats.bytes +
+        exportTempStats.bytes +
+        logsStats.bytes,
+    },
+    counts: {
+      originals: originalsStats.files,
+      previews: previewsStats.files,
+      thumbnails: thumbnailsStats.files,
+      ocrTemp: ocrTempStats.files,
+      exportTemp: exportTempStats.files,
+      logs: logsStats.files,
+      cacheFiles:
+        thumbnailsStats.files +
+        ocrTempStats.files +
+        exportTempStats.files +
+        logsStats.files,
+      totalFiles:
+        originalsStats.files +
+        previewsStats.files +
+        thumbnailsStats.files +
+        ocrTempStats.files +
+        exportTempStats.files +
+        logsStats.files,
     },
   };
 }
@@ -124,5 +209,82 @@ export function getStoragePlanningSnapshot() {
     ocrTempRoot: paths.ocrTempRoot,
     exportTempRoot: paths.exportTempRoot,
     logsRoot: paths.logsRoot,
+  };
+}
+
+export function clearStorageCache(action) {
+  const paths = ensureStorageLayout();
+  const actionMap = {
+    clearThumbnails: [paths.thumbnailsRoot],
+    clearOcrTemp: [paths.ocrTempRoot],
+    clearExportTemp: [paths.exportTempRoot],
+    clearLogs: [paths.logsRoot],
+    clearAllCache: [
+      paths.thumbnailsRoot,
+      paths.ocrTempRoot,
+      paths.exportTempRoot,
+      paths.logsRoot,
+    ],
+    clearOrphanCache: [],
+  };
+
+  if (!(action in actionMap)) {
+    return {
+      ok: false,
+      action,
+      deletedFiles: 0,
+      deletedBytes: 0,
+      errors: [`Unsupported cache action: ${action}`],
+    };
+  }
+
+  if (action === 'clearOrphanCache') {
+    return {
+      ok: true,
+      action,
+      deletedFiles: 0,
+      deletedBytes: 0,
+      errors: [],
+      note: 'clearOrphanCache 当前仅保留骨架，暂未执行实际删除，以避免误删正式文件。',
+    };
+  }
+
+  const result = {
+    ok: true,
+    action,
+    deletedFiles: 0,
+    deletedBytes: 0,
+    errors: [],
+  };
+
+  for (const targetDir of actionMap[action]) {
+    const dirResult = removeDirContents(targetDir);
+    result.deletedFiles += dirResult.deletedFiles;
+    result.deletedBytes += dirResult.deletedBytes;
+    result.errors.push(...dirResult.errors);
+  }
+
+  result.ok = result.errors.length === 0;
+  return result;
+}
+
+export function resolveStorageOpenTarget(target = 'root') {
+  const paths = ensureStorageLayout();
+  const targetMap = {
+    root: paths.storageRoot,
+    data: paths.dataRoot,
+    originals: paths.originalsRoot,
+    previews: paths.previewsRoot,
+    cache: paths.cacheRoot,
+    logs: paths.logsRoot,
+  };
+
+  if (!(target in targetMap)) {
+    throw new Error(`Unsupported storage open target: ${target}`);
+  }
+
+  return {
+    target,
+    absolutePath: targetMap[target],
   };
 }

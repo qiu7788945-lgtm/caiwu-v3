@@ -209,13 +209,21 @@ export default function App() {
   }, [sellerCompanies]);
 
   const [isBackendOpen, setIsBackendOpen] = useState(false);
-  const [backendTab, setBackendTab] = useState<'companies' | 'sellerCompanies' | 'invoiceTypes' | 'reimbursers' | 'data'>('companies');
+  const [backendTab, setBackendTab] = useState<'companies' | 'sellerCompanies' | 'invoiceTypes' | 'reimbursers' | 'storage' | 'data'>('companies');
   const [newCompanyLabel, setNewCompanyLabel] = useState('');
   const [newSellerCompanyLabel, setNewSellerCompanyLabel] = useState('');
   const [newReimburserLabel, setNewReimburserLabel] = useState('');
   const [newTypeLabel, setNewTypeLabel] = useState('');
   const [newTypeValue, setNewTypeValue] = useState('');
   const [newTypeTax, setNewTypeTax] = useState('');
+  const [storageSummary, setStorageSummary] = useState<Awaited<ReturnType<NonNullable<typeof window.invoiceStorage>['getSummary']>> | null>(null);
+  const [isStorageLoading, setIsStorageLoading] = useState(false);
+  const [storageActionLoading, setStorageActionLoading] = useState<string | null>(null);
+  const [storageActionMessage, setStorageActionMessage] = useState<string | null>(null);
+  const [migrationStatus, setMigrationStatus] = useState<Awaited<ReturnType<NonNullable<typeof window.invoiceMigration>['getStatus']>> | null>(null);
+  const [isMigrationLoading, setIsMigrationLoading] = useState(false);
+  const [migrationActionLoading, setMigrationActionLoading] = useState<string | null>(null);
+  const [migrationActionMessage, setMigrationActionMessage] = useState<string | null>(null);
 
   const [isAutoMode, setIsAutoMode] = useState(() => {
     const saved = localStorage.getItem('invoice_auto_mode');
@@ -242,6 +250,270 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('invoice_column_widths', JSON.stringify(columnWidths));
   }, [columnWidths]);
+
+  const formatStorageBytes = (bytes: number) => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unitIndex = 0;
+
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+
+    const digits = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+    return `${value.toFixed(digits)} ${units[unitIndex]}`;
+  };
+
+  const refreshStorageSummary = async (silent = false) => {
+    if (!window.invoiceStorage) {
+      const message = '当前运行环境未提供存储管理桥接。';
+      setStorageActionMessage(message);
+      if (!silent) {
+        setError(message);
+      }
+      return;
+    }
+
+    setIsStorageLoading(true);
+    try {
+      const summary = await window.invoiceStorage.getSummary();
+      setStorageSummary(summary);
+      if (!silent) {
+        setStorageActionMessage('存储统计已刷新。');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '读取存储统计失败';
+      setStorageActionMessage(message);
+      setError(message);
+    } finally {
+      setIsStorageLoading(false);
+    }
+  };
+
+  const handleStorageOpenPath = async (target: 'root' | 'data' | 'originals' | 'previews' | 'cache' | 'logs') => {
+    if (!window.invoiceStorage) {
+      const message = '当前运行环境未提供存储管理桥接。';
+      setStorageActionMessage(message);
+      setError(message);
+      return;
+    }
+
+    setStorageActionLoading(`open:${target}`);
+    try {
+      const result = target === 'root'
+        ? await window.invoiceStorage.openRoot()
+        : await window.invoiceStorage.openPath(target);
+      if (!result.ok) {
+        throw new Error(result.error || '打开目录失败');
+      }
+      setStorageActionMessage(`已打开目录：${result.absolutePath}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '打开目录失败';
+      setStorageActionMessage(message);
+      setError(message);
+    } finally {
+      setStorageActionLoading(null);
+    }
+  };
+
+  const handleStorageClearCache = async (
+    action: 'clearThumbnails' | 'clearOcrTemp' | 'clearExportTemp' | 'clearLogs' | 'clearAllCache'
+  ) => {
+    if (!window.invoiceStorage) {
+      const message = '当前运行环境未提供存储管理桥接。';
+      setStorageActionMessage(message);
+      setError(message);
+      return;
+    }
+
+    setStorageActionLoading(action);
+    try {
+      const result = await window.invoiceStorage.clearCache(action);
+      const message = result.ok
+        ? `操作完成：已清理 ${result.deletedFiles} 个文件，释放 ${formatStorageBytes(result.deletedBytes)}。`
+        : `清理未完全成功：已清理 ${result.deletedFiles} 个文件，释放 ${formatStorageBytes(result.deletedBytes)}。${result.errors[0] ? ` 原因：${result.errors[0]}` : ''}`;
+      setStorageActionMessage(message);
+      if (!result.ok) {
+        setError(message);
+      }
+      await refreshStorageSummary(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '清理缓存失败';
+      setStorageActionMessage(message);
+      setError(message);
+    } finally {
+      setStorageActionLoading(null);
+    }
+  };
+
+  const handleOptimizeStorageDatabase = async () => {
+    if (!window.invoiceStorage) {
+      const message = '当前运行环境未提供存储管理桥接。';
+      setStorageActionMessage(message);
+      setError(message);
+      return;
+    }
+
+    setStorageActionLoading('optimizeDatabase');
+    try {
+      const result = await window.invoiceStorage.optimizeDatabase();
+      const message = result.ok
+        ? `数据库优化完成：当前大小 ${formatStorageBytes(result.afterBytes)}，回收 ${formatStorageBytes(result.bytesReclaimed)}。`
+        : '数据库优化失败';
+      setStorageActionMessage(message);
+      if (!result.ok) {
+        setError(message);
+      }
+      await refreshStorageSummary(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '数据库优化失败';
+      setStorageActionMessage(message);
+      setError(message);
+    } finally {
+      setStorageActionLoading(null);
+    }
+  };
+
+  const refreshMigrationStatus = async (silent = false) => {
+    if (!window.invoiceMigration) {
+      const message = '当前运行环境未提供迁移桥接。';
+      setMigrationActionMessage(message);
+      if (!silent) {
+        setError(message);
+      }
+      return;
+    }
+
+    setIsMigrationLoading(true);
+    try {
+      const status = await window.invoiceMigration.getStatus();
+      setMigrationStatus(status);
+      if (!silent) {
+        setMigrationActionMessage('迁移状态已刷新。');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '读取迁移状态失败';
+      setMigrationActionMessage(message);
+      setError(message);
+    } finally {
+      setIsMigrationLoading(false);
+    }
+  };
+
+  const runLegacyMigrationBatch = async (batchSize = 20) => {
+    if (!window.invoiceMigration) {
+      const message = '当前运行环境未提供迁移桥接。';
+      setMigrationActionMessage(message);
+      setError(message);
+      return;
+    }
+
+    setMigrationActionLoading('runBatch');
+    try {
+      const totalRecords = await db.invoices.count();
+      let status = await window.invoiceMigration.getStatus();
+
+      if (status.status === 'idle') {
+        status = await window.invoiceMigration.startLegacySync({
+          totalRecords,
+          config: { batchSize },
+        });
+      } else if (status.status === 'paused') {
+        status = await window.invoiceMigration.resumeLegacySync();
+      }
+
+      const lastId = status.lastId ?? 0;
+      const legacyRecords = await db.invoices
+        .where('id')
+        .above(lastId)
+        .limit(batchSize)
+        .toArray();
+
+      const filteredRecords = legacyRecords
+        .filter(record => typeof record.id === 'number')
+        .map(record => ({
+          id: record.id ?? null,
+          raw_data: record.raw_data ?? null,
+          invoice_code: record.invoice_code ?? null,
+          invoice_number: record.invoice_number ?? null,
+          amount: record.amount ?? null,
+          date: record.date ?? null,
+          check_code: record.check_code ?? null,
+          is_duplicate: Boolean(record.is_duplicate),
+          buyer_company: record.buyer_company ?? null,
+          invoice_type: record.invoice_type ?? null,
+          seller_company: record.seller_company ?? null,
+          tax_rate: record.tax_rate ?? null,
+          tax_amount: record.tax_amount ?? null,
+          total_amount: record.total_amount ?? null,
+          reimburser: record.reimburser ?? null,
+          targetMonth: record.targetMonth ?? null,
+          created_at: record.created_at ?? null,
+          import_batch_id: record.import_batch_id ?? null,
+          source_page: record.source_page ?? null,
+          image_base64: record.image_base64 ?? null,
+        }));
+
+      const result = await window.invoiceMigration.runLegacySyncBatch({
+        batchSize,
+        totalRecords,
+        sourceHasMore: legacyRecords.length === batchSize,
+        records: filteredRecords,
+      });
+
+      setMigrationStatus(result.taskStatus);
+      setMigrationActionMessage(
+        `本批迁移完成：处理 ${result.processedInThisBatch} 条，成功 ${result.successInThisBatch} 条，失败 ${result.failedInThisBatch} 条，跳过 ${result.skippedInThisBatch} 条。`
+      );
+
+      if (result.errors.length > 0) {
+        setError(`迁移批次存在失败：${result.errors[0]}`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '执行迁移批次失败';
+      setMigrationActionMessage(message);
+      setError(message);
+    } finally {
+      setMigrationActionLoading(null);
+    }
+  };
+
+  const pauseLegacyMigration = async () => {
+    if (!window.invoiceMigration) {
+      const message = '当前运行环境未提供迁移桥接。';
+      setMigrationActionMessage(message);
+      setError(message);
+      return;
+    }
+
+    setMigrationActionLoading('pauseMigration');
+    try {
+      const status = await window.invoiceMigration.pauseLegacySync();
+      setMigrationStatus(status);
+      setMigrationActionMessage('迁移任务已标记为暂停。');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '暂停迁移失败';
+      setMigrationActionMessage(message);
+      setError(message);
+    } finally {
+      setMigrationActionLoading(null);
+    }
+  };
+
+  useEffect(() => {
+    if (isBackendOpen && backendTab === 'storage' && !storageSummary && !isStorageLoading) {
+      void refreshStorageSummary(true);
+    }
+  }, [isBackendOpen, backendTab, storageSummary, isStorageLoading]);
+
+  useEffect(() => {
+    if (isBackendOpen && backendTab === 'storage' && !migrationStatus && !isMigrationLoading) {
+      void refreshMigrationStatus(true);
+    }
+  }, [isBackendOpen, backendTab, migrationStatus, isMigrationLoading]);
 
   const resizingCol = useRef<string | null>(null);
   const startX = useRef<number>(0);
@@ -345,6 +617,17 @@ export default function App() {
 
   const isSubmittingRef = useRef(false);
 
+  const isEligibleInvoiceNumberForDuplicateCheck = (invoiceNumber: string | null) => {
+    if (!invoiceNumber) return false;
+
+    const normalized = invoiceNumber.trim();
+    if (!normalized || /^UNKNOWN-/i.test(normalized)) {
+      return false;
+    }
+
+    return /^\d{20}$/.test(normalized) || /^\d{8}$/.test(normalized);
+  };
+
   const handleScanSubmit = async (data: string, imageBase64?: string) => {
     if (isSubmittingRef.current) return; // 防抖，防止瞬间多次触发
 
@@ -371,10 +654,31 @@ export default function App() {
 
       // 提取发票号码进行查重
       const finalInvoiceNumber = invoice_number || `UNKNOWN-${Date.now()}`;
+      const targetMonth = activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth;
+      const createdAt = new Date().toISOString();
 
-      // --- 查重区 ---
-      const existingInvoice = await db.invoices.where('invoice_number').equals(finalInvoiceNumber).first();
-      const is_duplicate = !!existingInvoice;
+      const primaryStorageResult = await persistQrInvoiceToPrimaryStorage({
+        rawData: trimmedData,
+        invoice: {
+          invoice_code,
+          invoice_number: finalInvoiceNumber,
+          invoice_type,
+          date,
+          total_amount: parsedAmount,
+          check_code,
+          targetMonth,
+          created_at: createdAt,
+          is_duplicate: false,
+        },
+      });
+
+      let is_duplicate = false;
+      if (primaryStorageResult.ok) {
+        is_duplicate = primaryStorageResult.duplicateDetected;
+      } else if (isEligibleInvoiceNumberForDuplicateCheck(finalInvoiceNumber)) {
+        const existingInvoice = await db.invoices.where('invoice_number').equals(finalInvoiceNumber).first();
+        is_duplicate = !!existingInvoice;
+      }
       
       if (is_duplicate) {
         playBeep('duplicate');
@@ -395,16 +699,28 @@ export default function App() {
         total_amount: parsedAmount,
         check_code,
         tax_rate: null,
-        targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
-        created_at: new Date().toISOString(),
+        targetMonth,
+        created_at: createdAt,
         import_batch_id: null,
         source_page: null,
         image_base64: imageBase64 || null,
       });
       newInvoice.is_duplicate = is_duplicate;
 
-      // 将包含完整属性的数据真实写入 IndexedDB
-      await db.invoices.add(newInvoice);
+      try {
+        // 当前 UI 兼容副本仍然写入 Dexie
+        await db.invoices.add(newInvoice);
+      } catch (err) {
+        if (primaryStorageResult.ok) {
+          throw new Error(`SQLite 已成功，Dexie 兼容副本失败，请勿重复扫码。${err instanceof Error ? ` 原因：${err.message}` : ''}`);
+        }
+        throw new Error(`Dexie 兼容副本写入失败：${err instanceof Error ? err.message : '未知错误'}`);
+      }
+
+      if (!primaryStorageResult.ok) {
+        console.error('[scan primary storage failed]', primaryStorageResult);
+        setError(`扫码数据已写入当前界面兼容存储，但新主存试点失败：${primaryStorageResult.message}`);
+      }
       
       // --- 焦点重置区 ---
       if (scannerInputRef.current) {
@@ -569,6 +885,8 @@ export default function App() {
         ok: true as const,
         savedFile,
         sqliteRecord,
+        duplicateDetected: sqliteRecord.duplicateDetected,
+        existingDuplicateInvoiceId: sqliteRecord.existingDuplicateInvoiceId,
       };
     } catch (err) {
       return {
@@ -576,6 +894,202 @@ export default function App() {
         stage: 'sqlite' as const,
         message: `SQLite 写入失败：${err instanceof Error ? err.message : '未知错误'}`,
         savedFile,
+      };
+    }
+  };
+
+  const persistPdfOriginalFileToPrimaryStorage = async (file: File, createdAt: string) => {
+    if (!window.invoiceStorage) {
+      return {
+        ok: false as const,
+        stage: 'bridge' as const,
+        message: '当前运行环境未提供 invoiceStorage 桥接，已跳过 PDF 原始文件落盘。',
+      };
+    }
+
+    try {
+      const fileBytes = await readFileAsBytes(file);
+      const savedFile = await window.invoiceStorage.saveOriginalFile({
+        content: fileBytes,
+        originalName: file.name,
+        mimeType: file.type || 'application/pdf',
+        createdAt: new Date(createdAt),
+      });
+
+      return {
+        ok: true as const,
+        savedFile,
+      };
+    } catch (err) {
+      return {
+        ok: false as const,
+        stage: 'file' as const,
+        message: `原始 PDF 落盘失败：${err instanceof Error ? err.message : '未知错误'}`,
+      };
+    }
+  };
+
+  const persistPdfPageInvoiceToPrimaryStorage = async ({
+    rawData,
+    invoice,
+    savedFile,
+    originalName,
+    mimeType,
+  }: {
+    rawData: string;
+    invoice: {
+      invoice_code: string | null;
+      invoice_number: string | null;
+      invoice_type: string | null;
+      buyer_company: string | null;
+      seller_company: string | null;
+      date: string | null;
+      amount: number | null;
+      tax_amount: number | null;
+      total_amount: number | null;
+      check_code: string | null;
+      tax_rate: string | null;
+      targetMonth: string | null;
+      created_at: string;
+      import_batch_id: string | null;
+      source_page: number | null;
+      is_duplicate: boolean;
+    };
+    savedFile: Awaited<ReturnType<NonNullable<typeof window.invoiceStorage>['saveOriginalFile']>>;
+    originalName: string;
+    mimeType: string;
+  }) => {
+    if (!window.invoiceStorage) {
+      return {
+        ok: false as const,
+        stage: 'bridge' as const,
+        message: '当前运行环境未提供 invoiceStorage 桥接，已跳过 SQLite 试点写入。',
+      };
+    }
+
+    try {
+      const sqliteRecord = await window.invoiceStorage.createInvoiceRecord({
+        invoice: {
+          raw_data: rawData,
+          invoice_code: invoice.invoice_code,
+          invoice_number: invoice.invoice_number,
+          invoice_type: invoice.invoice_type,
+          buyer_company: invoice.buyer_company,
+          seller_company: invoice.seller_company,
+          date: invoice.date,
+          amount: invoice.amount,
+          tax_amount: invoice.tax_amount,
+          total_amount: invoice.total_amount,
+          check_code: invoice.check_code,
+          tax_rate: invoice.tax_rate,
+          targetMonth: invoice.targetMonth,
+          created_at: invoice.created_at,
+          import_batch_id: invoice.import_batch_id,
+          source_page: invoice.source_page,
+          is_duplicate: invoice.is_duplicate,
+          image_base64: null,
+          primary_file_id: null,
+          original_file_path: savedFile.absolutePath,
+          preview_file_path: null,
+          thumbnail_file_path: null,
+          storage_status: 'ready',
+          storage_version: 1,
+        },
+        file: {
+          file_role: 'original',
+          file_kind: 'pdf',
+          original_name: originalName,
+          mime_type: mimeType || 'application/pdf',
+          ext: savedFile.ext,
+          size_bytes: savedFile.sizeBytes,
+          relative_path: savedFile.relativePath,
+          absolute_path: savedFile.absolutePath,
+          sha256: savedFile.sha256,
+          source_page: invoice.source_page,
+        },
+      });
+
+      return {
+        ok: true as const,
+        sqliteRecord,
+        duplicateDetected: sqliteRecord.duplicateDetected,
+        existingDuplicateInvoiceId: sqliteRecord.existingDuplicateInvoiceId,
+      };
+    } catch (err) {
+      return {
+        ok: false as const,
+        stage: 'sqlite' as const,
+        message: `SQLite 写入失败：${err instanceof Error ? err.message : '未知错误'}`,
+      };
+    }
+  };
+
+  const persistQrInvoiceToPrimaryStorage = async ({
+    rawData,
+    invoice,
+  }: {
+    rawData: string;
+    invoice: {
+      invoice_code: string | null;
+      invoice_number: string | null;
+      invoice_type: string | null;
+      date: string | null;
+      total_amount: number | null;
+      check_code: string | null;
+      targetMonth: string | null;
+      created_at: string;
+      is_duplicate: boolean;
+    };
+  }) => {
+    if (!window.invoiceStorage) {
+      return {
+        ok: false as const,
+        stage: 'bridge' as const,
+        message: '当前运行环境未提供 invoiceStorage 桥接，已跳过 SQLite 试点写入。',
+      };
+    }
+
+    try {
+      const sqliteRecord = await window.invoiceStorage.createInvoiceRecord({
+        invoice: {
+          raw_data: rawData,
+          invoice_code: invoice.invoice_code,
+          invoice_number: invoice.invoice_number,
+          invoice_type: invoice.invoice_type,
+          buyer_company: null,
+          seller_company: null,
+          date: invoice.date,
+          amount: null,
+          tax_amount: null,
+          total_amount: invoice.total_amount,
+          check_code: invoice.check_code,
+          tax_rate: null,
+          targetMonth: invoice.targetMonth,
+          created_at: invoice.created_at,
+          import_batch_id: null,
+          source_page: null,
+          is_duplicate: invoice.is_duplicate,
+          image_base64: null,
+          primary_file_id: null,
+          original_file_path: null,
+          preview_file_path: null,
+          thumbnail_file_path: null,
+          storage_status: 'ready',
+          storage_version: 1,
+        },
+      });
+
+      return {
+        ok: true as const,
+        sqliteRecord,
+        duplicateDetected: sqliteRecord.duplicateDetected,
+        existingDuplicateInvoiceId: sqliteRecord.existingDuplicateInvoiceId,
+      };
+    } catch (err) {
+      return {
+        ok: false as const,
+        stage: 'sqlite' as const,
+        message: `SQLite 写入失败：${err instanceof Error ? err.message : '未知错误'}`,
       };
     }
   };
@@ -675,12 +1189,6 @@ export default function App() {
     const createdAt = new Date().toISOString();
     const targetMonth = activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth;
 
-    let isDuplicate = false;
-    if (finalInvoiceNumber) {
-      const existing = await db.invoices.where('invoice_number').equals(finalInvoiceNumber).first();
-      isDuplicate = !!existing;
-    }
-
     const primaryStorageResult = await persistImageInvoiceToPrimaryStorage({
       file,
       rawData: extractedText,
@@ -700,9 +1208,17 @@ export default function App() {
         created_at: createdAt,
         import_batch_id: null,
         source_page: null,
-        is_duplicate: isDuplicate,
+        is_duplicate: false,
       },
     });
+
+    let isDuplicate = false;
+    if (primaryStorageResult.ok) {
+      isDuplicate = primaryStorageResult.duplicateDetected;
+    } else if (isEligibleInvoiceNumberForDuplicateCheck(finalInvoiceNumber)) {
+      const existing = await db.invoices.where('invoice_number').equals(finalInvoiceNumber).first();
+      isDuplicate = !!existing;
+    }
 
     const newInvoice: Invoice = createInvoiceDraft({
       raw_data: extractedText,
@@ -754,12 +1270,15 @@ export default function App() {
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         const pdfImportBatchId = `PDF_IMPORT_${Date.now()}`;
+        const pdfBatchCreatedAt = new Date().toISOString();
+        const pdfTargetMonth = activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth;
 
         if (pdf.numPages > 150) {
           throw new Error('PDF 页数超过 150 页，请拆分后导入');
         }
 
         const failedPages: string[] = [];
+        const primaryStorageWarnings: string[] = [];
         let successCount = 0;
         const DEBUG_PDF_OCR = true;
         const isValidPdfOcrText = (text: string) => {
@@ -1023,17 +1542,10 @@ export default function App() {
           const runSingleOcrAttempt = async (scale: number) => {
             try {
               const imageBase64 = await renderPdfPageImage(page, scale);
-              const response = await fetch('/api/ocr/image', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ image_base64: imageBase64 }),
-              });
-              const result = await response.json();
-              const ocrText = typeof result?.text === 'string' ? result.text.trim() : '';
+              const renderedFile = await dataUrlToFile(imageBase64, pageNumber);
+              const ocrText = (await extractImageOcrText(renderedFile, imageBase64)).trim();
               return {
-                ok: response.ok && result?.ok === true,
+                ok: ocrText.length > 0,
                 text: ocrText,
                 score: scorePdfOcrText(ocrText),
                 scale,
@@ -1067,6 +1579,28 @@ export default function App() {
 
           return bestAttempt.ok && isValidPdfOcrText(bestAttempt.text) ? bestAttempt.text : '';
         };
+        const recognizedPdfPages: Array<{
+          pageNumber: number;
+          rawData: string;
+          invoice: {
+            invoice_code: string | null;
+            invoice_number: string | null;
+            invoice_type: string | null;
+            buyer_company: string | null;
+            seller_company: string | null;
+            date: string | null;
+            amount: number | null;
+            tax_amount: number | null;
+            total_amount: number | null;
+            check_code: string | null;
+            tax_rate: string | null;
+            targetMonth: string | null;
+            created_at: string;
+            import_batch_id: string | null;
+            source_page: number | null;
+            is_duplicate: boolean;
+          };
+        }> = [];
 
         for (let i = 1; i <= pdf.numPages; i++) {
           try {
@@ -1260,38 +1794,105 @@ export default function App() {
               }
             }
 
-            const newInvoice: Invoice = createInvoiceDraft({
-              raw_data: `OCR_PARSED_${Date.now()}_${i}`,
-              invoice_code,
-              invoice_number: finalInvoiceNumber ?? null,
-              invoice_type,
-              buyer_company,
-              seller_company,
-              date,
-              amount: finalAmount,
-              tax_amount: finalTaxAmount,
-              total_amount: finalTotalAmount,
-              check_code,
-              tax_rate,
-              targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
-              created_at: new Date().toISOString(),
-              import_batch_id: pdfImportBatchId,
-              source_page: i,
-              image_base64: null,
+            const pageCreatedAt = new Date().toISOString();
+            recognizedPdfPages.push({
+              pageNumber: i,
+              rawData: pageTextToParse,
+              invoice: {
+                invoice_code,
+                invoice_number: finalInvoiceNumber ?? null,
+                invoice_type,
+                buyer_company,
+                seller_company,
+                date,
+                amount: finalAmount,
+                tax_amount: finalTaxAmount,
+                total_amount: finalTotalAmount,
+                check_code,
+                tax_rate,
+                targetMonth: pdfTargetMonth,
+                created_at: pageCreatedAt,
+                import_batch_id: pdfImportBatchId,
+                source_page: i,
+                is_duplicate: false,
+              },
             });
-
-            if (newInvoice.invoice_number) {
-              const existing = await db.invoices.where('invoice_number').equals(newInvoice.invoice_number).first();
-              if (existing) {
-                newInvoice.is_duplicate = true;
-              }
-            }
-
-            await db.invoices.add(newInvoice);
-            successCount += 1;
           } catch (pageErr) {
             const reason = pageErr instanceof Error ? pageErr.message : '解析失败';
             failedPages.push(`${i}(${reason})`);
+          }
+        }
+
+        let savedPdfResult: Awaited<ReturnType<typeof persistPdfOriginalFileToPrimaryStorage>> | null = null;
+        if (recognizedPdfPages.length > 0) {
+          savedPdfResult = await persistPdfOriginalFileToPrimaryStorage(file, pdfBatchCreatedAt);
+        }
+
+        const savedPdfFile = savedPdfResult?.ok ? savedPdfResult.savedFile : null;
+        const pdfStorageWarning = savedPdfResult && !savedPdfResult.ok
+          ? `${savedPdfResult.message}，已跳过 PDF SQLite 试点写入。`
+          : null;
+
+        for (const recognizedPage of recognizedPdfPages) {
+          const { pageNumber, rawData, invoice } = recognizedPage;
+
+          try {
+            const primaryStorageResult = savedPdfFile
+              ? await persistPdfPageInvoiceToPrimaryStorage({
+                  rawData,
+                  invoice,
+                  savedFile: savedPdfFile,
+                  originalName: file.name,
+                  mimeType: file.type || 'application/pdf',
+                })
+              : null;
+            let isDuplicate = false;
+            if (primaryStorageResult?.ok) {
+              isDuplicate = primaryStorageResult.duplicateDetected;
+            } else if (isEligibleInvoiceNumberForDuplicateCheck(invoice.invoice_number ?? null)) {
+              const existing = await db.invoices.where('invoice_number').equals(invoice.invoice_number!).first();
+              isDuplicate = !!existing;
+            }
+
+            const newInvoice: Invoice = createInvoiceDraft({
+              raw_data: `OCR_PARSED_${Date.now()}_${pageNumber}`,
+              invoice_code: invoice.invoice_code,
+              invoice_number: invoice.invoice_number,
+              invoice_type: invoice.invoice_type,
+              buyer_company: invoice.buyer_company,
+              seller_company: invoice.seller_company,
+              date: invoice.date,
+              amount: invoice.amount,
+              tax_amount: invoice.tax_amount,
+              total_amount: invoice.total_amount,
+              check_code: invoice.check_code,
+              tax_rate: invoice.tax_rate,
+              targetMonth: invoice.targetMonth,
+              created_at: invoice.created_at,
+              import_batch_id: invoice.import_batch_id,
+              source_page: invoice.source_page,
+              image_base64: null,
+            });
+            newInvoice.is_duplicate = isDuplicate;
+
+            try {
+              await db.invoices.add(newInvoice);
+            } catch (dexieErr) {
+              if (primaryStorageResult?.ok) {
+                throw new Error(`Dexie 兼容副本写入失败，但 SQLite 试点写入已成功。请勿重复导入。${dexieErr instanceof Error ? ` 原因：${dexieErr.message}` : ''}`);
+              }
+              throw new Error(`Dexie 兼容副本写入失败：${dexieErr instanceof Error ? dexieErr.message : '未知错误'}`);
+            }
+
+            if (primaryStorageResult && !primaryStorageResult.ok) {
+              console.error('[pdf primary storage failed]', { page: pageNumber, result: primaryStorageResult });
+              primaryStorageWarnings.push(`${pageNumber}(${primaryStorageResult.message})`);
+            }
+
+            successCount += 1;
+          } catch (storageErr) {
+            const reason = storageErr instanceof Error ? storageErr.message : '入库失败';
+            failedPages.push(`${pageNumber}(${reason})`);
           }
         }
 
@@ -1299,7 +1900,12 @@ export default function App() {
           ocrFileInputRef.current.value = '';
         }
 
-        setError(`共 ${pdf.numPages} 页，成功 ${successCount} 页，失败 ${failedPages.length} 页${failedPages.length ? `，失败页：${failedPages.join(', ')}` : ''}`);
+        setError(
+          `共 ${pdf.numPages} 页，成功 ${successCount} 页，失败 ${failedPages.length} 页`
+          + `${failedPages.length ? `，失败页：${failedPages.join(', ')}` : ''}`
+          + `${pdfStorageWarning ? `；PDF 原件存储：${pdfStorageWarning}` : ''}`
+          + `${primaryStorageWarnings.length ? `；新主存试点失败页：${primaryStorageWarnings.join(', ')}` : ''}`
+        );
         return;
       }
 
@@ -2179,6 +2785,12 @@ export default function App() {
                   报销人管理
                 </button>
                 <button 
+                  onClick={() => setBackendTab('storage')} 
+                  className={cn("px-3 py-2.5 text-sm font-medium rounded-xl text-left transition-colors", backendTab === 'storage' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-200")}
+                >
+                  存储管理
+                </button>
+                <button 
                   onClick={() => setBackendTab('data')} 
                   className={cn("px-3 py-2.5 text-sm font-medium rounded-xl text-left transition-colors", backendTab === 'data' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-200")}
                 >
@@ -2399,6 +3011,213 @@ export default function App() {
                             </button>
                           </div>
                         ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {backendTab === 'storage' && (
+                  <div className="space-y-6">
+                    <div className="p-5 border border-slate-200 rounded-2xl bg-slate-50">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <h4 className="text-sm font-medium text-slate-900 mb-1">本地存储概览</h4>
+                          <p className="text-sm text-slate-500">
+                            主数据、原始附件和缓存已分层存放。清缓存不会删除主数据库和原始附件。
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => refreshStorageSummary()}
+                          disabled={isStorageLoading || storageActionLoading !== null}
+                          className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-sm"
+                        >
+                          {isStorageLoading ? '刷新中...' : '刷新统计'}
+                        </button>
+                      </div>
+                      {storageActionMessage && (
+                        <div className="mt-4 px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm text-slate-600">
+                          {storageActionMessage}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {[
+                        { label: '数据库大小', value: formatStorageBytes(storageSummary?.sizes.database ?? 0), hint: `${storageSummary?.counts.dbInvoiceCount ?? 0} 条发票 / ${storageSummary?.counts.dbFileCount ?? 0} 条文件元数据` },
+                        { label: 'originals 大小', value: formatStorageBytes(storageSummary?.sizes.originals ?? 0), hint: '原始附件，属于正式数据' },
+                        { label: 'previews 大小', value: formatStorageBytes(storageSummary?.sizes.previews ?? 0), hint: '预览资源，当前不纳入清缓存' },
+                        { label: 'thumbnails 大小', value: formatStorageBytes(storageSummary?.sizes.thumbnails ?? 0), hint: '可清理缓存' },
+                        { label: 'OCR temp 大小', value: formatStorageBytes(storageSummary?.sizes.ocrTemp ?? 0), hint: '可清理缓存' },
+                        { label: 'export temp 大小', value: formatStorageBytes(storageSummary?.sizes.exportTemp ?? 0), hint: '可清理缓存' },
+                        { label: 'logs 大小', value: formatStorageBytes(storageSummary?.sizes.logs ?? 0), hint: '可清理缓存' },
+                        { label: '总大小', value: formatStorageBytes(storageSummary?.sizes.total ?? 0), hint: `${storageSummary?.counts.cacheFiles ?? 0} 个缓存文件 / ${storageSummary?.counts.totalFiles ?? 0} 个总文件` },
+                      ].map(item => (
+                        <div key={item.label} className="p-4 bg-white rounded-2xl border border-slate-200 shadow-sm">
+                          <div className="text-sm text-slate-500 mb-1">{item.label}</div>
+                          <div className="text-lg font-semibold text-slate-900">{item.value}</div>
+                          <div className="text-xs text-slate-500 mt-1">{item.hint}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="p-5 border border-slate-200 rounded-2xl">
+                      <h4 className="text-sm font-medium text-slate-900 mb-4">目录操作</h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <button
+                          onClick={() => handleStorageOpenPath('root')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                        >
+                          <FolderOpen className="w-4 h-4" />
+                          {storageActionLoading === 'open:root' ? '打开中...' : '打开存储根目录'}
+                        </button>
+                        <button
+                          onClick={() => handleStorageOpenPath('data')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                        >
+                          <FolderOpen className="w-4 h-4" />
+                          {storageActionLoading === 'open:data' ? '打开中...' : '打开 data 目录'}
+                        </button>
+                        <button
+                          onClick={() => handleStorageOpenPath('originals')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                        >
+                          <FolderOpen className="w-4 h-4" />
+                          {storageActionLoading === 'open:originals' ? '打开中...' : '打开 originals 目录'}
+                        </button>
+                        <button
+                          onClick={() => handleStorageOpenPath('cache')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                        >
+                          <FolderOpen className="w-4 h-4" />
+                          {storageActionLoading === 'open:cache' ? '打开中...' : '打开 cache 目录'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="p-5 border border-slate-200 rounded-2xl">
+                      <h4 className="text-sm font-medium text-slate-900 mb-2">缓存清理</h4>
+                      <p className="text-xs text-slate-500 mb-4">
+                        这里只清缓存，不会删除主数据库、正式发票记录和 originals 原始附件。
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <button
+                          onClick={() => handleStorageClearCache('clearThumbnails')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                        >
+                          {storageActionLoading === 'clearThumbnails' ? '清理中...' : '清理缩略图缓存'}
+                        </button>
+                        <button
+                          onClick={() => handleStorageClearCache('clearOcrTemp')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                        >
+                          {storageActionLoading === 'clearOcrTemp' ? '清理中...' : '清理 OCR 临时文件'}
+                        </button>
+                        <button
+                          onClick={() => handleStorageClearCache('clearExportTemp')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                        >
+                          {storageActionLoading === 'clearExportTemp' ? '清理中...' : '清理导出临时文件'}
+                        </button>
+                        <button
+                          onClick={() => handleStorageClearCache('clearLogs')}
+                          disabled={storageActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                        >
+                          {storageActionLoading === 'clearLogs' ? '清理中...' : '清理日志'}
+                        </button>
+                        <button
+                          onClick={() => handleStorageClearCache('clearAllCache')}
+                          disabled={storageActionLoading !== null}
+                          className="md:col-span-2 px-4 py-2 bg-amber-50 border border-amber-200 rounded-xl text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50 transition-colors"
+                        >
+                          {storageActionLoading === 'clearAllCache' ? '清理中...' : '清理全部缓存'}
+                        </button>
+                      </div>
+                      <div className="mt-3 text-xs text-slate-400">孤儿缓存清理：预留，暂未启用。</div>
+                    </div>
+
+                    <div className="p-5 border border-slate-200 rounded-2xl flex flex-col gap-3">
+                      <div>
+                        <h4 className="text-sm font-medium text-slate-900 mb-1">数据库维护</h4>
+                        <p className="text-xs text-slate-500">执行 SQLite VACUUM / ANALYZE，优化数据库文件体积与查询统计。</p>
+                      </div>
+                      <button
+                        onClick={handleOptimizeStorageDatabase}
+                        disabled={storageActionLoading !== null}
+                        className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-sm self-start flex items-center gap-2"
+                      >
+                        <Database className="w-4 h-4" />
+                        {storageActionLoading === 'optimizeDatabase' ? '优化中...' : '优化数据库'}
+                      </button>
+                    </div>
+
+                    <div className="p-5 border border-slate-200 rounded-2xl flex flex-col gap-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <h4 className="text-sm font-medium text-slate-900 mb-1">老数据迁移试点</h4>
+                          <p className="text-xs text-slate-500">
+                            当前只做小批量试迁，不切正式读取，不删除 Dexie。每次默认迁移 20 条老记录。
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => refreshMigrationStatus()}
+                          disabled={isMigrationLoading || migrationActionLoading !== null}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                        >
+                          {isMigrationLoading ? '刷新中...' : '刷新迁移状态'}
+                        </button>
+                      </div>
+
+                      {migrationActionMessage && (
+                        <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm text-slate-600">
+                          {migrationActionMessage}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {[
+                          { label: '任务状态', value: migrationStatus?.status || 'idle', hint: migrationStatus?.summary.note || '尚未开始试迁' },
+                          { label: '当前阶段', value: migrationStatus?.phase || 'bootstrap', hint: migrationStatus?.summary.currentStep || 'not_started' },
+                          { label: '已处理 / 总数', value: `${migrationStatus?.processedRecords ?? 0} / ${migrationStatus?.totalRecords ?? 0}`, hint: `成功 ${migrationStatus?.successRecords ?? 0}，失败 ${migrationStatus?.failedRecords ?? 0}，跳过 ${migrationStatus?.skippedRecords ?? 0}` },
+                          { label: '断点位置', value: migrationStatus?.lastId != null ? `lastId=${migrationStatus.lastId}` : '未建立', hint: migrationStatus?.lastCursor ? `cursor=${migrationStatus.lastCursor}` : '尚未生成 cursor' },
+                        ].map(item => (
+                          <div key={item.label} className="p-4 bg-white rounded-2xl border border-slate-200 shadow-sm">
+                            <div className="text-sm text-slate-500 mb-1">{item.label}</div>
+                            <div className="text-lg font-semibold text-slate-900 break-all">{item.value}</div>
+                            <div className="text-xs text-slate-500 mt-1">{item.hint}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <button
+                          onClick={() => runLegacyMigrationBatch(20)}
+                          disabled={migrationActionLoading !== null || isMigrationLoading}
+                          className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-sm"
+                        >
+                          {migrationActionLoading === 'runBatch' ? '迁移中...' : '试迁 20 条老数据'}
+                        </button>
+                        <button
+                          onClick={pauseLegacyMigration}
+                          disabled={migrationActionLoading !== null || isMigrationLoading}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                        >
+                          {migrationActionLoading === 'pauseMigration' ? '暂停中...' : '暂停迁移'}
+                        </button>
+                        <button
+                          onClick={() => runLegacyMigrationBatch(20)}
+                          disabled={migrationActionLoading !== null || isMigrationLoading}
+                          className="px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                        >
+                          {migrationActionLoading === 'runBatch' ? '继续中...' : '继续下一批'}
+                        </button>
                       </div>
                     </div>
                   </div>
