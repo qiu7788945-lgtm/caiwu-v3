@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { ensureOcrService, registerOcrIpcHandlers, stopOcrService } from './electron/ocr/service.js';
 import { getStorageDatabaseInfo } from './electron/storage/database.js';
 import { registerStorageIpcHandlers } from './electron/storage/ipc.js';
 import { ensureStorageLayout } from './electron/storage/paths.js';
@@ -33,14 +34,27 @@ function createWindow() {
   }
 }
 
+function initializeStorageFoundation() {
+  try {
+    ensureStorageLayout();
+    registerOcrIpcHandlers();
+    registerStorageIpcHandlers();
+
+    const storageInfo = getStorageDatabaseInfo();
+    console.log('[storage] sqlite ready:', storageInfo.path);
+    console.log('[storage] schema version:', storageInfo.schemaVersion);
+  } catch (error) {
+    console.error('[storage] initialization skipped:', error);
+  }
+}
+
 app.whenReady().then(() => {
-  ensureStorageLayout();
-  registerStorageIpcHandlers();
-
-  const storageInfo = getStorageDatabaseInfo();
-  console.log('[storage] sqlite ready:', storageInfo.path);
-  console.log('[storage] schema version:', storageInfo.schemaVersion);
-
+  initializeStorageFoundation();
+  ensureOcrService().then((result) => {
+    if (!result.ok) {
+      console.warn('[ocr-service] startup skipped:', result.error);
+    }
+  });
   createWindow();
 
   app.on('activate', function () {
@@ -50,4 +64,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', function () {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  stopOcrService();
 });

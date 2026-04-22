@@ -53,9 +53,3 @@ export function ensureStorageLayout() {
 
   return paths;
 }
-
-export function buildDatedSubdir(rootDir, date = new Date()) {
-  const year = String(date.getFullYear());
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  return ensureDir(path.join(rootDir, year, month));
-}

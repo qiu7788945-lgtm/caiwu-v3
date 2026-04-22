@@ -113,6 +113,24 @@ const EditableCell = ({ value, onChange, type = "text", placeholder = "点击填
   );
 };
 
+const formatBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+};
+
 /**
  * 生成归档月份列表（从2026年03月开始，直到当前系统月份+1个月）
  * 确保历史月份不会随时间推移而消失
@@ -209,13 +227,18 @@ export default function App() {
   }, [sellerCompanies]);
 
   const [isBackendOpen, setIsBackendOpen] = useState(false);
-  const [backendTab, setBackendTab] = useState<'companies' | 'sellerCompanies' | 'invoiceTypes' | 'reimbursers' | 'data'>('companies');
+  const [backendTab, setBackendTab] = useState<'companies' | 'sellerCompanies' | 'invoiceTypes' | 'reimbursers' | 'data' | 'storage'>('companies');
   const [newCompanyLabel, setNewCompanyLabel] = useState('');
   const [newSellerCompanyLabel, setNewSellerCompanyLabel] = useState('');
   const [newReimburserLabel, setNewReimburserLabel] = useState('');
   const [newTypeLabel, setNewTypeLabel] = useState('');
   const [newTypeValue, setNewTypeValue] = useState('');
   const [newTypeTax, setNewTypeTax] = useState('');
+  const [storageSummary, setStorageSummary] = useState<InvoiceStorageSummary | null>(null);
+  const [isStorageSummaryLoading, setIsStorageSummaryLoading] = useState(false);
+  const [storageSummaryError, setStorageSummaryError] = useState<string | null>(null);
+  const [storageActionMessage, setStorageActionMessage] = useState<string | null>(null);
+  const [isClearingStorageCache, setIsClearingStorageCache] = useState(false);
 
   const [isAutoMode, setIsAutoMode] = useState(() => {
     const saved = localStorage.getItem('invoice_auto_mode');
@@ -225,6 +248,80 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('invoice_auto_mode', JSON.stringify(isAutoMode));
   }, [isAutoMode]);
+
+  const loadStorageSummary = async () => {
+    const getSummary = window.invoiceStorage?.getSummary;
+    if (!getSummary) {
+      setStorageSummary(null);
+      setStorageSummaryError('当前环境不支持存储管理');
+      return;
+    }
+
+    setIsStorageSummaryLoading(true);
+    setStorageSummaryError(null);
+
+    try {
+      const summary = await getSummary();
+      setStorageSummary(summary);
+    } catch (err) {
+      console.warn('[storage] 获取本地存储统计失败', err);
+      setStorageSummaryError(err instanceof Error ? err.message : '获取本地存储统计失败');
+    } finally {
+      setIsStorageSummaryLoading(false);
+    }
+  };
+
+  const handleOpenStorageRoot = async () => {
+    const openRoot = window.invoiceStorage?.openRoot;
+    if (!openRoot) {
+      setStorageActionMessage('当前环境不支持打开数据目录');
+      return;
+    }
+
+    try {
+      const result = await openRoot();
+      if (!result.ok) {
+        setStorageActionMessage(result.error || '打开数据目录失败');
+        return;
+      }
+      setStorageActionMessage(`已尝试打开数据目录：${result.target}`);
+    } catch (err) {
+      console.warn('[storage] 打开数据目录失败', err);
+      setStorageActionMessage(err instanceof Error ? err.message : '打开数据目录失败');
+    }
+  };
+
+  const handleClearStorageCache = async () => {
+    const clearCache = window.invoiceStorage?.clearCache;
+    if (!clearCache) {
+      setStorageActionMessage('当前环境不支持清缓存');
+      return;
+    }
+
+    setIsClearingStorageCache(true);
+
+    try {
+      const result = await clearCache();
+      if (!result.ok) {
+        setStorageActionMessage(result.error || '清缓存失败');
+        return;
+      }
+
+      setStorageActionMessage(
+        `缓存已清理：释放 ${formatBytes(result.deletedBytes)}，删除 ${result.deletedFiles} 个文件、${result.deletedDirectories} 个目录。`
+      );
+      await loadStorageSummary();
+    } catch (err) {
+      console.warn('[storage] 清缓存失败', err);
+      setStorageActionMessage(err instanceof Error ? err.message : '清缓存失败');
+    } finally {
+      setIsClearingStorageCache(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadStorageSummary();
+  }, []);
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
     const saved = localStorage.getItem('invoice_column_widths');
@@ -343,6 +440,44 @@ export default function App() {
     }
   };
 
+  const tryPersistScannedInvoiceToPrimaryStorage = async (invoice: Invoice) => {
+    const createInvoiceRecord = window.invoiceStorage?.createInvoiceRecord;
+    if (!createInvoiceRecord) {
+      return;
+    }
+
+    try {
+      await createInvoiceRecord({
+        invoice: {
+          raw_data: invoice.raw_data,
+          invoice_code: invoice.invoice_code,
+          invoice_number: invoice.invoice_number,
+          amount: null,
+          date: invoice.date,
+          check_code: invoice.check_code,
+          is_duplicate: invoice.is_duplicate,
+          buyer_company: null,
+          invoice_type: invoice.invoice_type,
+          seller_company: null,
+          tax_rate: null,
+          tax_amount: null,
+          total_amount: invoice.total_amount,
+          reimburser: invoice.reimburser ?? null,
+          targetMonth: invoice.targetMonth,
+          created_at: invoice.created_at,
+          import_batch_id: null,
+          source_page: null,
+          primary_file_id: null,
+          original_file_path: null,
+          preview_file_path: null,
+          thumbnail_file_path: null,
+        },
+      });
+    } catch (error) {
+      console.warn('[storage] 扫码新增写入 SQLite 失败，已跳过，不影响当前主链路。', error);
+    }
+  };
+
   const isSubmittingRef = useRef(false);
 
   const handleScanSubmit = async (data: string, imageBase64?: string) => {
@@ -405,6 +540,7 @@ export default function App() {
 
       // 将包含完整属性的数据真实写入 IndexedDB
       await db.invoices.add(newInvoice);
+      await tryPersistScannedInvoiceToPrimaryStorage(newInvoice);
       
       // --- 焦点重置区 ---
       if (scannerInputRef.current) {
@@ -580,7 +716,110 @@ export default function App() {
     }
   };
 
+  const persistPdfInvoicesToPrimaryStorage = async ({
+    file,
+    invoices,
+  }: {
+    file: File;
+    invoices: Invoice[];
+  }) => {
+    if (!window.invoiceStorage || invoices.length === 0) {
+      return {
+        ok: false as const,
+        stage: 'bridge' as const,
+        message: '当前运行环境未提供 invoiceStorage 桥接，已跳过 PDF SQLite 试点写入。',
+      };
+    }
+
+    let savedFile: Awaited<ReturnType<NonNullable<typeof window.invoiceStorage>['saveOriginalFile']>> | null = null;
+
+    try {
+      const fileBytes = await readFileAsBytes(file);
+      savedFile = await window.invoiceStorage.saveOriginalFile({
+        content: fileBytes,
+        originalName: file.name,
+        mimeType: file.type || 'application/pdf',
+        createdAt: new Date(),
+      });
+    } catch (err) {
+      return {
+        ok: false as const,
+        stage: 'file' as const,
+        message: `PDF 原件落盘失败：${err instanceof Error ? err.message : '未知错误'}`,
+      };
+    }
+
+    const failedPages: string[] = [];
+
+    for (const invoice of invoices) {
+      try {
+        await window.invoiceStorage.createInvoiceRecord({
+          invoice: {
+            raw_data: invoice.raw_data,
+            invoice_code: invoice.invoice_code,
+            invoice_number: invoice.invoice_number,
+            amount: invoice.amount,
+            date: invoice.date,
+            check_code: invoice.check_code,
+            is_duplicate: invoice.is_duplicate,
+            buyer_company: invoice.buyer_company,
+            invoice_type: invoice.invoice_type,
+            seller_company: invoice.seller_company,
+            tax_rate: invoice.tax_rate,
+            tax_amount: invoice.tax_amount,
+            total_amount: invoice.total_amount,
+            reimburser: invoice.reimburser ?? null,
+            targetMonth: invoice.targetMonth,
+            created_at: invoice.created_at,
+            import_batch_id: invoice.import_batch_id ?? null,
+            source_page: invoice.source_page ?? null,
+            primary_file_id: null,
+            original_file_path: savedFile.absolutePath,
+            preview_file_path: null,
+            thumbnail_file_path: null,
+          },
+        });
+      } catch (err) {
+        failedPages.push(
+          `${invoice.source_page ?? '?'}(${err instanceof Error ? err.message : 'SQLite 写入失败'})`
+        );
+      }
+    }
+
+    if (failedPages.length > 0) {
+      return {
+        ok: false as const,
+        stage: 'sqlite' as const,
+        message: `PDF SQLite 写入失败页：${failedPages.join(', ')}`,
+        savedFile,
+      };
+    }
+
+    return {
+      ok: true as const,
+      savedFile,
+    };
+  };
+
   const requestLocalOcrText = async (imageBase64: string) => {
+    if (window.invoiceOcr?.recognizeImage) {
+      try {
+        const result = await window.invoiceOcr.recognizeImage({ imageBase64 });
+        const electronText = typeof result?.text === 'string' ? result.text.trim() : '';
+        if (result?.ok === true && electronText.replace(/\s+/g, '').length >= 20) {
+          console.log('[OCR source]', 'electron-service');
+          console.log('[OCR raw preview]', electronText.slice(0, 80));
+          return electronText;
+        }
+
+        if (result?.ok === false) {
+          console.warn('[OCR electron-service failed]', result.error || '未知错误');
+        }
+      } catch (err) {
+        console.warn('[OCR electron-service request failed]', err);
+      }
+    }
+
     try {
       const response = await fetch('/api/ocr/image', {
         method: 'POST',
@@ -681,29 +920,6 @@ export default function App() {
       isDuplicate = !!existing;
     }
 
-    const primaryStorageResult = await persistImageInvoiceToPrimaryStorage({
-      file,
-      rawData: extractedText,
-      invoice: {
-        invoice_code,
-        invoice_number: finalInvoiceNumber,
-        invoice_type,
-        buyer_company,
-        seller_company,
-        date,
-        amount: finalAmount,
-        tax_amount: finalTaxAmount,
-        total_amount: finalTotalAmount,
-        check_code,
-        tax_rate,
-        targetMonth,
-        created_at: createdAt,
-        import_batch_id: null,
-        source_page: null,
-        is_duplicate: isDuplicate,
-      },
-    });
-
     const newInvoice: Invoice = createInvoiceDraft({
       raw_data: extractedText,
       invoice_code,
@@ -728,15 +944,34 @@ export default function App() {
     try {
       await db.invoices.add(newInvoice);
     } catch (err) {
-      if (primaryStorageResult.ok) {
-        throw new Error(`Dexie 兼容副本写入失败，但 SQLite 试点写入已成功。请勿重复导入。${err instanceof Error ? ` 原因：${err.message}` : ''}`);
-      }
       throw new Error(`Dexie 兼容副本写入失败：${err instanceof Error ? err.message : '未知错误'}`);
     }
 
-    if (!primaryStorageResult.ok) {
-      console.error('[image-ocr primary storage failed]', primaryStorageResult);
-      setError(`图片 OCR 已写入当前界面兼容存储，但新主存试点失败：${primaryStorageResult.message}`);
+    const primaryStorageResult = await persistImageInvoiceToPrimaryStorage({
+      file,
+      rawData: extractedText,
+      invoice: {
+        invoice_code,
+        invoice_number: finalInvoiceNumber,
+        invoice_type,
+        buyer_company,
+        seller_company,
+        date,
+        amount: finalAmount,
+        tax_amount: finalTaxAmount,
+        total_amount: finalTotalAmount,
+        check_code,
+        tax_rate,
+        targetMonth,
+        created_at: createdAt,
+        import_batch_id: null,
+        source_page: null,
+        is_duplicate: isDuplicate,
+      },
+    });
+
+    if (!primaryStorageResult.ok && primaryStorageResult.stage !== 'bridge') {
+      console.warn('[image-ocr primary storage skipped]', primaryStorageResult);
     }
   };
 
@@ -761,6 +996,7 @@ export default function App() {
 
         const failedPages: string[] = [];
         let successCount = 0;
+        const successfulPdfInvoices: Invoice[] = [];
         const DEBUG_PDF_OCR = true;
         const isValidPdfOcrText = (text: string) => {
           const normalized = (text || '').replace(/\s+/g, '');
@@ -1023,17 +1259,9 @@ export default function App() {
           const runSingleOcrAttempt = async (scale: number) => {
             try {
               const imageBase64 = await renderPdfPageImage(page, scale);
-              const response = await fetch('/api/ocr/image', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ image_base64: imageBase64 }),
-              });
-              const result = await response.json();
-              const ocrText = typeof result?.text === 'string' ? result.text.trim() : '';
+              const ocrText = (await requestLocalOcrText(imageBase64)).trim();
               return {
-                ok: response.ok && result?.ok === true,
+                ok: ocrText.length > 0,
                 text: ocrText,
                 score: scorePdfOcrText(ocrText),
                 scale,
@@ -1067,6 +1295,264 @@ export default function App() {
 
           return bestAttempt.ok && isValidPdfOcrText(bestAttempt.text) ? bestAttempt.text : '';
         };
+        const getPdfParseQualityScore = (candidate: {
+          invoice_code: string | null;
+          invoice_number: string | null;
+          date: string | null;
+          total_amount: number | null;
+          amount: number | null;
+          tax_amount: number | null;
+          tax_rate: string | null;
+          buyer_company: string | null;
+          seller_company: string | null;
+          check_code: string | null;
+        }) => {
+          let score = 0;
+          if (candidate.invoice_code) score += 1;
+          if (candidate.invoice_number) score += 1;
+          if (candidate.date) score += 1;
+          if (candidate.total_amount != null) score += 1;
+          if (candidate.amount != null) score += 1;
+          if (candidate.tax_amount != null) score += 1;
+          if (candidate.tax_rate) score += 1;
+          if (candidate.check_code) score += 1;
+          if (candidate.buyer_company) score += 2;
+          if (candidate.seller_company) score += 2;
+          return score;
+        };
+        const buildPdfParseCandidate = (
+          sourceText: string,
+          qrParsed: ReturnType<typeof parseQrInvoice> | null
+        ) => {
+          const noSpaceText = sourceText.replace(/\s+/g, '');
+          const parsedPdf = parsePdfInvoice(sourceText);
+          let invoice_code = parsedPdf.invoice_code;
+          let invoice_number = parsedPdf.invoice_number;
+          let date = parsedPdf.date;
+          let buyer_company = parsedPdf.buyer_company;
+          let seller_company = parsedPdf.seller_company;
+          let total_amount = parsedPdf.total_amount;
+          let amount = parsedPdf.amount;
+          let tax_amount = parsedPdf.tax_amount;
+          let check_code = parsedPdf.check_code;
+          let invoice_type = parsedPdf.invoice_type;
+          let tax_rate = parsedPdf.tax_rate;
+          const qrInvoiceNumber = qrParsed?.invoice_number && /^\d{20}$/.test(qrParsed.invoice_number)
+            ? qrParsed.invoice_number
+            : null;
+          const qrDate = qrParsed?.date && /^\d{8}$/.test(qrParsed.date)
+            ? qrParsed.date
+            : null;
+          const qrTotalAmount = typeof qrParsed?.parsedAmount === 'number'
+            ? Number(qrParsed.parsedAmount.toFixed(2))
+            : null;
+          const qrCheckCode = qrParsed?.check_code || null;
+
+          if (qrInvoiceNumber) invoice_number = qrInvoiceNumber;
+          if (qrDate) date = qrDate;
+          if (qrTotalAmount != null) total_amount = qrTotalAmount;
+          if (qrCheckCode) check_code = qrCheckCode;
+
+          if (!invoice_number) {
+            const layoutInvoiceMatch = noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
+            if (layoutInvoiceMatch) invoice_number = layoutInvoiceMatch[1];
+          }
+
+          if (!date) {
+            const layoutDateMatch = noSpaceText.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+            if (layoutDateMatch) {
+              date = `${layoutDateMatch[1]}${layoutDateMatch[2].padStart(2, '0')}${layoutDateMatch[3].padStart(2, '0')}`;
+            }
+          }
+
+          const taxIdCandidates = [...new Set((noSpaceText.match(/[A-Z0-9]{15,25}/g) || []).filter(v => /[A-Z]/.test(v) && /\d/.test(v)))];
+          const firstTaxId = taxIdCandidates[0] || '';
+          const secondTaxId = taxIdCandidates[1] || '';
+          const firstTaxIdPos = firstTaxId ? noSpaceText.indexOf(firstTaxId) : -1;
+          const secondTaxIdPos = secondTaxId ? noSpaceText.indexOf(secondTaxId, firstTaxIdPos + firstTaxId.length) : -1;
+
+          const datePos = noSpaceText.search(/\d{4}年\d{1,2}月\d{1,2}日/);
+          const companyNamePattern = /(?:[\u4e00-\u9fa5()（）a-zA-Z0-9]{2,80})(?:有限责任公司|股份有限公司|分公司|事务所|工作室|中心|公司|店|厂)/g;
+          const cleanCompanyName = (value: string) => value
+            .replace(/\d{4}年\d{1,2}月\d{1,2}日/g, '')
+            .replace(/[A-Z0-9]{15,25}/g, '')
+            .replace(/开票日期/g, '')
+            .replace(/纳税人识别号|统一社会信用代码/g, '')
+            .trim();
+
+          if (!buyer_company && datePos >= 0 && firstTaxIdPos > datePos) {
+            const buyerSection = noSpaceText.slice(datePos, firstTaxIdPos).replace(/^\d{4}年\d{1,2}月\d{1,2}日/, '');
+            const buyerCompanyMatches = [...buyerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
+            if (buyerCompanyMatches.length > 0) {
+              buyer_company = buyerCompanyMatches[buyerCompanyMatches.length - 1];
+            }
+          }
+
+          if (!seller_company && firstTaxIdPos >= 0 && secondTaxIdPos > firstTaxIdPos) {
+            const sellerSection = noSpaceText.slice(firstTaxIdPos, secondTaxIdPos).replace(/^[A-Z0-9]{15,25}/, '');
+            const sellerCompanyMatches = [...sellerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
+            if (sellerCompanyMatches.length > 0) {
+              seller_company = sellerCompanyMatches[sellerCompanyMatches.length - 1];
+            }
+          }
+
+          const allYenAmounts = noSpaceText.match(/[￥¥]\d+\.\d{2}/g) || [];
+          if ((amount === null || tax_amount === null || total_amount === null) && allYenAmounts.length >= 3) {
+            const firstAmount = allYenAmounts[0];
+            const secondAmount = allYenAmounts[1];
+            const lastAmount = allYenAmounts[allYenAmounts.length - 1];
+            if (amount === null && firstAmount) amount = parseAmt(firstAmount.slice(1));
+            if (tax_amount === null && secondAmount) tax_amount = parseAmt(secondAmount.slice(1));
+            if (total_amount === null && lastAmount) total_amount = parseAmt(lastAmount.slice(1));
+          }
+
+          if (!tax_rate) {
+            const layoutTaxRateMatch = noSpaceText.match(/(13|9|6|3|1|0)%/);
+            if (layoutTaxRateMatch) tax_rate = `${layoutTaxRateMatch[1]}%`;
+          }
+
+          let matchedKeyword = '';
+          if (noSpaceText.includes('退票费')) matchedKeyword = '退票费';
+          else if (noSpaceText.includes('火车票') || noSpaceText.includes('铁路客票')) matchedKeyword = '火车票';
+          else if (noSpaceText.includes('飞机票') || noSpaceText.includes('航空运输电子客票行程单') || noSpaceText.includes('行程单')) matchedKeyword = '飞机票';
+          else if (noSpaceText.includes('客运服务费') || noSpaceText.includes('汽车票') || noSpaceText.includes('客运')) matchedKeyword = '客运服务费';
+          else if (noSpaceText.includes('通行费')) matchedKeyword = '通行费';
+          else if (noSpaceText.includes('增值税') || noSpaceText.includes('电子发票') || noSpaceText.includes('普通发票') || noSpaceText.includes('专用发票') || noSpaceText.includes('数电票') || noSpaceText.includes('发票')) matchedKeyword = '其他及普票';
+
+          const normalizedInvoiceNumber = (invoice_number || '').trim();
+          const labelInvoiceNumber = noSpaceText.match(/(?:发票号码|票号|号码)[:：]?(\d{20})(?!\d)/)?.[1] || null;
+          const first20DigitMatch = noSpaceText.match(/\d{20}/);
+          const first20Digit = first20DigitMatch ? first20DigitMatch[0] : null;
+          const fallbackInvoiceNumber = labelInvoiceNumber || first20Digit;
+          const finalInvoiceNumber = normalizedInvoiceNumber ? normalizedInvoiceNumber : fallbackInvoiceNumber;
+          const finalYenAmounts = noSpaceText.match(/[￥¥]\d+\.\d{2}/g) || [];
+          const finalYenFirst = finalYenAmounts[0] || null;
+          const finalYenSecond = finalYenAmounts[1] || null;
+          const finalYenLast = finalYenAmounts.length > 0 ? finalYenAmounts[finalYenAmounts.length - 1] : null;
+          const yenFallbackAmount = finalYenFirst ? parseAmt(finalYenFirst.slice(1)) : null;
+          const yenFallbackTaxAmount = finalYenSecond ? parseAmt(finalYenSecond.slice(1)) : null;
+          const yenFallbackTotalAmount = finalYenLast ? parseAmt(finalYenLast.slice(1)) : null;
+          let finalAmount = amount ?? yenFallbackAmount ?? null;
+          let finalTaxAmount = tax_amount ?? yenFallbackTaxAmount ?? null;
+          let finalTotalAmount = qrTotalAmount ?? total_amount ?? yenFallbackTotalAmount ?? null;
+          const normalizedInitialTriple = normalizeAmountTriple(finalAmount, finalTaxAmount, finalTotalAmount, tax_rate);
+          finalAmount = normalizedInitialTriple.amount;
+          finalTaxAmount = normalizedInitialTriple.tax_amount;
+          finalTotalAmount = normalizedInitialTriple.total_amount;
+
+          if (
+            finalTotalAmount != null
+            && finalTotalAmount < 0
+            && (finalAmount == null || finalTaxAmount == null)
+          ) {
+            const bottomTriplet = pickBottomAmountTriplet(sourceText, tax_rate);
+            if (bottomTriplet && bottomTriplet.total_amount != null && bottomTriplet.total_amount < 0) {
+              finalAmount = bottomTriplet.amount ?? finalAmount;
+              finalTaxAmount = bottomTriplet.tax_amount ?? finalTaxAmount;
+              finalTotalAmount = qrTotalAmount ?? bottomTriplet.total_amount;
+            }
+          }
+
+          if (!isAmountTripleConsistent(finalAmount, finalTaxAmount, finalTotalAmount)) {
+            const bottomTriplet = pickBottomAmountTriplet(sourceText, tax_rate);
+            if (bottomTriplet) {
+              finalAmount = bottomTriplet.amount;
+              finalTaxAmount = bottomTriplet.tax_amount;
+              finalTotalAmount = qrTotalAmount ?? bottomTriplet.total_amount;
+            }
+          }
+          const normalizedFinalTriple = normalizeAmountTriple(finalAmount, finalTaxAmount, finalTotalAmount, tax_rate);
+          finalAmount = normalizedFinalTriple.amount;
+          finalTaxAmount = normalizedFinalTriple.tax_amount;
+          finalTotalAmount = normalizedFinalTriple.total_amount;
+
+          if (!isAmountTripleConsistent(finalAmount, finalTaxAmount, finalTotalAmount)) {
+            finalAmount = null;
+            finalTaxAmount = null;
+          }
+
+          if (matchedKeyword) {
+            const preset = invoiceTypes.find(t => t.value.includes(matchedKeyword) || t.label.includes(matchedKeyword));
+            if (preset) {
+              invoice_type = preset.value;
+            }
+          }
+
+          const candidate = {
+            sourceText,
+            noSpaceText,
+            invoice_code,
+            invoice_number: finalInvoiceNumber ?? null,
+            invoice_type,
+            buyer_company,
+            seller_company,
+            date,
+            amount: finalAmount,
+            tax_amount: finalTaxAmount,
+            total_amount: finalTotalAmount,
+            check_code,
+            tax_rate,
+          };
+
+          return {
+            ...candidate,
+            qualityScore: getPdfParseQualityScore(candidate),
+          };
+        };
+        const shouldRunPdfFallbackOcr = ({
+          pageText,
+          parsedFromText,
+          qrParsed,
+        }: {
+          pageText: string;
+          parsedFromText: ReturnType<typeof buildPdfParseCandidate>;
+          qrParsed: ReturnType<typeof parseQrInvoice> | null;
+        }) => {
+          const normalizedText = (pageText || '').replace(/\s+/g, '');
+          if (!normalizedText || normalizedText.length < 20) {
+            return { shouldRun: true, reason: 'text-too-short' as const };
+          }
+
+          if (!isValidPdfOcrText(pageText)) {
+            return { shouldRun: true, reason: 'text-invalid' as const };
+          }
+
+          const missingAmountTaxFields = [
+            parsedFromText.amount,
+            parsedFromText.tax_amount,
+            parsedFromText.tax_rate,
+          ].filter((value) => value == null || value === '').length;
+
+          const hasOnlyShallowFields = Boolean(
+            parsedFromText.invoice_number
+            && parsedFromText.date
+            && parsedFromText.total_amount != null
+            && !parsedFromText.buyer_company
+            && !parsedFromText.seller_company
+          );
+
+          if (!parsedFromText.buyer_company && !parsedFromText.seller_company) {
+            return { shouldRun: true, reason: 'company-fields-missing' as const };
+          }
+
+          if (missingAmountTaxFields >= 2) {
+            return { shouldRun: true, reason: 'amount-tax-fields-thin' as const };
+          }
+
+          if (hasOnlyShallowFields) {
+            return { shouldRun: true, reason: 'shallow-fields-only' as const };
+          }
+
+          if (
+            scorePdfOcrText(pageText) < 180
+            && parsedFromText.qualityScore <= 4
+            && !qrParsed?.invoice_number
+          ) {
+            return { shouldRun: true, reason: 'fragmented-text-layer' as const };
+          }
+
+          return { shouldRun: false, reason: 'text-good-enough' as const };
+        };
 
         for (let i = 1; i <= pdf.numPages; i++) {
           try {
@@ -1074,17 +1560,39 @@ export default function App() {
             const textContent = await page.getTextContent();
             const pageText = textContent.items.map((item: any) => item.str).join('\n');
 
-            let pageTextToParse = pageText;
             let qrParsed: ReturnType<typeof parseQrInvoice> | null = null;
             if (pageText.replace(/\s+/g, '').length < 20) {
               const qrImageBase64 = await renderPdfPageImage(page, 2);
               qrParsed = await tryDecodePdfPageQr(qrImageBase64, i);
+            }
 
+            const parsedFromText = buildPdfParseCandidate(pageText, qrParsed);
+            const ocrDecision = shouldRunPdfFallbackOcr({
+              pageText,
+              parsedFromText,
+              qrParsed,
+            });
+
+            let selectedCandidate = parsedFromText;
+            let selectedSource: 'pdf-text' | 'ocr-text' = 'pdf-text';
+            let ocrQualityScore: number | null = null;
+
+            if (ocrDecision.shouldRun) {
+              console.log(`[PDF OCR trigger] page=${i} reason=${ocrDecision.reason}`);
               const fallbackText = await runPdfFallbackOcr(page, i);
               if (fallbackText) {
-                pageTextToParse = fallbackText;
+                const parsedFromOcr = buildPdfParseCandidate(fallbackText, qrParsed);
+                ocrQualityScore = parsedFromOcr.qualityScore;
+                if (parsedFromOcr.qualityScore > parsedFromText.qualityScore) {
+                  selectedCandidate = parsedFromOcr;
+                  selectedSource = 'ocr-text';
+                }
               }
             }
+
+            console.log(
+              `[PDF OCR result] page=${i} source=${selectedSource} pdfScore=${parsedFromText.qualityScore} ocrScore=${ocrQualityScore ?? 'n/a'}`
+            );
 
             const hasTrustedQrFields = Boolean(
               qrParsed?.invoice_number
@@ -1093,184 +1601,50 @@ export default function App() {
               || qrParsed?.check_code
             );
 
-            if (!hasTrustedQrFields && (!pageTextToParse.trim() || !isValidPdfOcrText(pageTextToParse))) {
+            if (
+              !hasTrustedQrFields
+              && (
+                !selectedCandidate.sourceText.trim()
+                || (!isValidPdfOcrText(selectedCandidate.sourceText) && selectedCandidate.qualityScore < 4)
+              )
+            ) {
               failedPages.push(`${i}(空白页)`);
               continue;
             }
 
-            const noSpaceText = pageTextToParse.replace(/\s+/g, '');
-            const parsedPdf = parsePdfInvoice(pageTextToParse);
-            let invoice_code = parsedPdf.invoice_code;
-            let invoice_number = parsedPdf.invoice_number;
-            let date = parsedPdf.date;
-            let buyer_company = parsedPdf.buyer_company;
-            let seller_company = parsedPdf.seller_company;
-            let total_amount = parsedPdf.total_amount;
-            let amount = parsedPdf.amount;
-            let tax_amount = parsedPdf.tax_amount;
-            let check_code = parsedPdf.check_code;
-            let invoice_type = parsedPdf.invoice_type;
-            let tax_rate = parsedPdf.tax_rate;
-            const qrInvoiceNumber = qrParsed?.invoice_number && /^\d{20}$/.test(qrParsed.invoice_number)
-              ? qrParsed.invoice_number
-              : null;
-            const qrDate = qrParsed?.date && /^\d{8}$/.test(qrParsed.date)
-              ? qrParsed.date
-              : null;
-            const qrTotalAmount = typeof qrParsed?.parsedAmount === 'number'
-              ? Number(qrParsed.parsedAmount.toFixed(2))
-              : null;
-            const qrCheckCode = qrParsed?.check_code || null;
+            const {
+              invoice_code,
+              invoice_number,
+              invoice_type,
+              buyer_company,
+              seller_company,
+              date,
+              amount,
+              tax_amount,
+              total_amount,
+              check_code,
+              tax_rate,
+            } = selectedCandidate;
 
-            if (qrInvoiceNumber) invoice_number = qrInvoiceNumber;
-            if (qrDate) date = qrDate;
-            if (qrTotalAmount != null) total_amount = qrTotalAmount;
-            if (qrCheckCode) check_code = qrCheckCode;
-
-            if (!invoice_number) {
-              const layoutInvoiceMatch = noSpaceText.match(/(?<!\d)(\d{20})(?!\d)/);
-              if (layoutInvoiceMatch) invoice_number = layoutInvoiceMatch[1];
-            }
-
-            if (!date) {
-              const layoutDateMatch = noSpaceText.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
-              if (layoutDateMatch) {
-                date = `${layoutDateMatch[1]}${layoutDateMatch[2].padStart(2, '0')}${layoutDateMatch[3].padStart(2, '0')}`;
-              }
-            }
-
-            const taxIdCandidates = [...new Set((noSpaceText.match(/[A-Z0-9]{15,25}/g) || []).filter(v => /[A-Z]/.test(v) && /\d/.test(v)))];
-            const firstTaxId = taxIdCandidates[0] || '';
-            const secondTaxId = taxIdCandidates[1] || '';
-            const firstTaxIdPos = firstTaxId ? noSpaceText.indexOf(firstTaxId) : -1;
-            const secondTaxIdPos = secondTaxId ? noSpaceText.indexOf(secondTaxId, firstTaxIdPos + firstTaxId.length) : -1;
-
-            const datePos = noSpaceText.search(/\d{4}年\d{1,2}月\d{1,2}日/);
-            const companyNamePattern = /(?:[\u4e00-\u9fa5()（）a-zA-Z0-9]{2,80})(?:有限责任公司|股份有限公司|分公司|事务所|工作室|中心|公司|店|厂)/g;
-            const cleanCompanyName = (value: string) => value
-              .replace(/\d{4}年\d{1,2}月\d{1,2}日/g, '')
-              .replace(/[A-Z0-9]{15,25}/g, '')
-              .replace(/开票日期/g, '')
-              .replace(/纳税人识别号|统一社会信用代码/g, '')
-              .trim();
-
-            if (!buyer_company && datePos >= 0 && firstTaxIdPos > datePos) {
-              const buyerSection = noSpaceText.slice(datePos, firstTaxIdPos).replace(/^\d{4}年\d{1,2}月\d{1,2}日/, '');
-              const buyerCompanyMatches = [...buyerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
-              if (buyerCompanyMatches.length > 0) {
-                buyer_company = buyerCompanyMatches[buyerCompanyMatches.length - 1];
-              }
-            }
-
-            if (!seller_company && firstTaxIdPos >= 0 && secondTaxIdPos > firstTaxIdPos) {
-              const sellerSection = noSpaceText.slice(firstTaxIdPos, secondTaxIdPos).replace(/^[A-Z0-9]{15,25}/, '');
-              const sellerCompanyMatches = [...sellerSection.matchAll(companyNamePattern)].map(m => cleanCompanyName(m[0])).filter(Boolean);
-              if (sellerCompanyMatches.length > 0) {
-                seller_company = sellerCompanyMatches[sellerCompanyMatches.length - 1];
-              }
-            }
-
-            const allYenAmounts = noSpaceText.match(/[￥¥]\d+\.\d{2}/g) || [];
-            if ((amount === null || tax_amount === null || total_amount === null) && allYenAmounts.length >= 3) {
-              const firstAmount = allYenAmounts[0];
-              const secondAmount = allYenAmounts[1];
-              const lastAmount = allYenAmounts[allYenAmounts.length - 1];
-              if (amount === null && firstAmount) amount = parseAmt(firstAmount.slice(1));
-              if (tax_amount === null && secondAmount) tax_amount = parseAmt(secondAmount.slice(1));
-              if (total_amount === null && lastAmount) total_amount = parseAmt(lastAmount.slice(1));
-            }
-
-            if (!tax_rate) {
-              const layoutTaxRateMatch = noSpaceText.match(/(13|9|6|3|1|0)%/);
-              if (layoutTaxRateMatch) tax_rate = `${layoutTaxRateMatch[1]}%`;
-            }
-
-            let matchedKeyword = '';
-            if (noSpaceText.includes('退票费')) matchedKeyword = '退票费';
-            else if (noSpaceText.includes('火车票') || noSpaceText.includes('铁路客票')) matchedKeyword = '火车票';
-            else if (noSpaceText.includes('飞机票') || noSpaceText.includes('航空运输电子客票行程单') || noSpaceText.includes('行程单')) matchedKeyword = '飞机票';
-            else if (noSpaceText.includes('客运服务费') || noSpaceText.includes('汽车票') || noSpaceText.includes('客运')) matchedKeyword = '客运服务费';
-            else if (noSpaceText.includes('通行费')) matchedKeyword = '通行费';
-            else if (noSpaceText.includes('增值税') || noSpaceText.includes('电子发票') || noSpaceText.includes('普通发票') || noSpaceText.includes('专用发票') || noSpaceText.includes('数电票') || noSpaceText.includes('发票')) matchedKeyword = '其他及普票';
-
-            const normalizedInvoiceNumber = (invoice_number || '').trim();
-            const labelInvoiceNumber = noSpaceText.match(/(?:发票号码|票号|号码)[:：]?(\d{20})(?!\d)/)?.[1] || null;
-            const first20DigitMatch = noSpaceText.match(/\d{20}/);
-            const first20Digit = first20DigitMatch ? first20DigitMatch[0] : null;
-            const fallbackInvoiceNumber = labelInvoiceNumber || first20Digit;
-            const finalInvoiceNumber = normalizedInvoiceNumber ? normalizedInvoiceNumber : fallbackInvoiceNumber;
-            const finalYenAmounts = noSpaceText.match(/[￥¥]\d+\.\d{2}/g) || [];
-            const finalYenFirst = finalYenAmounts[0] || null;
-            const finalYenSecond = finalYenAmounts[1] || null;
-            const finalYenLast = finalYenAmounts.length > 0 ? finalYenAmounts[finalYenAmounts.length - 1] : null;
-            const yenFallbackAmount = finalYenFirst ? parseAmt(finalYenFirst.slice(1)) : null;
-            const yenFallbackTaxAmount = finalYenSecond ? parseAmt(finalYenSecond.slice(1)) : null;
-            const yenFallbackTotalAmount = finalYenLast ? parseAmt(finalYenLast.slice(1)) : null;
-            let finalAmount = amount ?? yenFallbackAmount ?? null;
-            let finalTaxAmount = tax_amount ?? yenFallbackTaxAmount ?? null;
-            let finalTotalAmount = qrTotalAmount ?? total_amount ?? yenFallbackTotalAmount ?? null;
-            const normalizedInitialTriple = normalizeAmountTriple(finalAmount, finalTaxAmount, finalTotalAmount, tax_rate);
-            finalAmount = normalizedInitialTriple.amount;
-            finalTaxAmount = normalizedInitialTriple.tax_amount;
-            finalTotalAmount = normalizedInitialTriple.total_amount;
-
-            if (
-              finalTotalAmount != null
-              && finalTotalAmount < 0
-              && (finalAmount == null || finalTaxAmount == null)
-            ) {
-              const bottomTriplet = pickBottomAmountTriplet(pageTextToParse, tax_rate);
-              if (bottomTriplet && bottomTriplet.total_amount != null && bottomTriplet.total_amount < 0) {
-                finalAmount = bottomTriplet.amount ?? finalAmount;
-                finalTaxAmount = bottomTriplet.tax_amount ?? finalTaxAmount;
-                finalTotalAmount = qrTotalAmount ?? bottomTriplet.total_amount;
-              }
-            }
-
-            if (!isAmountTripleConsistent(finalAmount, finalTaxAmount, finalTotalAmount)) {
-              const bottomTriplet = pickBottomAmountTriplet(pageTextToParse, tax_rate);
-              if (bottomTriplet) {
-                finalAmount = bottomTriplet.amount;
-                finalTaxAmount = bottomTriplet.tax_amount;
-                finalTotalAmount = qrTotalAmount ?? bottomTriplet.total_amount;
-              }
-            }
-            const normalizedFinalTriple = normalizeAmountTriple(finalAmount, finalTaxAmount, finalTotalAmount, tax_rate);
-            finalAmount = normalizedFinalTriple.amount;
-            finalTaxAmount = normalizedFinalTriple.tax_amount;
-            finalTotalAmount = normalizedFinalTriple.total_amount;
-
-            if (!isAmountTripleConsistent(finalAmount, finalTaxAmount, finalTotalAmount)) {
-              finalAmount = null;
-              finalTaxAmount = null;
-            }
-
-            if (!finalInvoiceNumber && finalTotalAmount == null) {
+            if (!invoice_number && total_amount == null) {
               const reasons: string[] = [];
-              if (!finalInvoiceNumber) reasons.push('未识别到发票号码');
-              if (finalTotalAmount == null) reasons.push('未识别到价税合计');
+              if (!invoice_number) reasons.push('未识别到发票号码');
+              if (total_amount == null) reasons.push('未识别到价税合计');
               failedPages.push(`${i}(${reasons.join('、')})`);
               continue;
-            }
-
-            if (matchedKeyword) {
-              const preset = invoiceTypes.find(t => t.value.includes(matchedKeyword) || t.label.includes(matchedKeyword));
-              if (preset) {
-                invoice_type = preset.value;
-              }
             }
 
             const newInvoice: Invoice = createInvoiceDraft({
               raw_data: `OCR_PARSED_${Date.now()}_${i}`,
               invoice_code,
-              invoice_number: finalInvoiceNumber ?? null,
+              invoice_number: invoice_number ?? null,
               invoice_type,
               buyer_company,
               seller_company,
               date,
-              amount: finalAmount,
-              tax_amount: finalTaxAmount,
-              total_amount: finalTotalAmount,
+              amount,
+              tax_amount,
+              total_amount,
               check_code,
               tax_rate,
               targetMonth: activeFolderMonth === 'ALL' ? format(new Date(), 'yyyy年MM月') : activeFolderMonth,
@@ -1288,11 +1662,21 @@ export default function App() {
             }
 
             await db.invoices.add(newInvoice);
+            successfulPdfInvoices.push(newInvoice);
             successCount += 1;
           } catch (pageErr) {
             const reason = pageErr instanceof Error ? pageErr.message : '解析失败';
             failedPages.push(`${i}(${reason})`);
           }
+        }
+
+        const pdfPrimaryStorageResult = await persistPdfInvoicesToPrimaryStorage({
+          file,
+          invoices: successfulPdfInvoices,
+        });
+
+        if (!pdfPrimaryStorageResult.ok && pdfPrimaryStorageResult.stage !== 'bridge') {
+          console.warn('[pdf primary storage skipped]', pdfPrimaryStorageResult);
         }
 
         if (ocrFileInputRef.current) {
@@ -2184,6 +2568,12 @@ export default function App() {
                 >
                   数据与备份
                 </button>
+                <button 
+                  onClick={() => setBackendTab('storage')} 
+                  className={cn("px-3 py-2.5 text-sm font-medium rounded-xl text-left transition-colors", backendTab === 'storage' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-200")}
+                >
+                  存储管理
+                </button>
               </div>
               {/* Content */}
               <div className="flex-1 p-6 overflow-y-auto bg-white custom-scrollbar">
@@ -2454,6 +2844,195 @@ export default function App() {
                         <input type="file" accept=".json" className="hidden" onChange={importBackup} />
                       </label>
                     </div>
+                  </div>
+                )}
+
+                {backendTab === 'storage' && (
+                  <div className="space-y-4">
+                    <div className="p-5 border border-slate-200 rounded-2xl bg-slate-50">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <h4 className="font-medium text-slate-800 mb-1">本地存储概览</h4>
+                          <p className="text-sm text-slate-500">这里只读展示 Electron 本地存储占用情况，不执行删除、清缓存或迁移动作。</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => void loadStorageSummary()}
+                            disabled={isStorageSummaryLoading || isClearingStorageCache}
+                            className="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-xl text-sm font-medium hover:bg-slate-100 disabled:opacity-50 transition-colors"
+                          >
+                            {isStorageSummaryLoading ? '刷新中...' : '刷新'}
+                          </button>
+                          <button
+                            onClick={() => void handleClearStorageCache()}
+                            disabled={isClearingStorageCache}
+                            className="px-4 py-2 bg-amber-600 text-white rounded-xl text-sm font-medium hover:bg-amber-700 disabled:opacity-50 transition-colors shadow-sm"
+                          >
+                            {isClearingStorageCache ? '清理中...' : '清缓存'}
+                          </button>
+                          <button
+                            onClick={() => void handleOpenStorageRoot()}
+                            className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 transition-colors shadow-sm flex items-center gap-2"
+                          >
+                            <FolderOpen className="w-4 h-4" />
+                            打开数据目录
+                          </button>
+                        </div>
+                      </div>
+                      {storageSummaryError && (
+                        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                          {storageSummaryError}
+                        </div>
+                      )}
+                      {storageActionMessage && (
+                        <div className="mt-4 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+                          {storageActionMessage}
+                        </div>
+                      )}
+                    </div>
+
+                    {storageSummary && (
+                      <>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <div className="p-5 border border-slate-200 rounded-2xl bg-white">
+                            <h4 className="font-medium text-slate-800 mb-4">数据库</h4>
+                            <div className="space-y-3 text-sm">
+                              <div>
+                                <div className="text-slate-500 mb-1">数据库路径</div>
+                                <div className="text-slate-800 break-all">{storageSummary.database.path}</div>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">数据库大小</span>
+                                <span className="font-medium text-slate-800">{formatBytes(storageSummary.database.sizeBytes)}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">数据库状态</span>
+                                <span className="font-medium text-slate-800">{storageSummary.database.exists ? '已创建' : '未创建'}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">Schema 版本</span>
+                                <span className="font-medium text-slate-800">{storageSummary.database.schemaVersion}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="p-5 border border-slate-200 rounded-2xl bg-white">
+                            <h4 className="font-medium text-slate-800 mb-4">记录统计</h4>
+                            <div className="space-y-3 text-sm">
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">发票总数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.counts.invoices}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">文件总数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.counts.files}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">image_base64 存量</span>
+                                <span className="font-medium text-slate-800">{storageSummary.counts.imageBase64}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">缺少 original_file_path 的记录数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.counts.missingOriginalFilePath}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                          <div className="p-5 border border-slate-200 rounded-2xl bg-white">
+                            <h4 className="font-medium text-slate-800 mb-4">原始文件目录</h4>
+                            <div className="space-y-3 text-sm">
+                              <div className="text-slate-500 break-all">{storageSummary.directories.originals.path}</div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">目录大小</span>
+                                <span className="font-medium text-slate-800">{formatBytes(storageSummary.directories.originals.sizeBytes)}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">文件数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.directories.originals.fileCount}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="p-5 border border-slate-200 rounded-2xl bg-white">
+                            <h4 className="font-medium text-slate-800 mb-4">预览目录</h4>
+                            <div className="space-y-3 text-sm">
+                              <div className="text-slate-500 break-all">{storageSummary.directories.previews.path}</div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">目录大小</span>
+                                <span className="font-medium text-slate-800">{formatBytes(storageSummary.directories.previews.sizeBytes)}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">文件数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.directories.previews.fileCount}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="p-5 border border-slate-200 rounded-2xl bg-white">
+                            <h4 className="font-medium text-slate-800 mb-4">缓存目录</h4>
+                            <div className="space-y-3 text-sm">
+                              <div className="text-slate-500 break-all">{storageSummary.directories.cache.path}</div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">目录大小</span>
+                                <span className="font-medium text-slate-800">{formatBytes(storageSummary.directories.cache.sizeBytes)}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">文件数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.directories.cache.fileCount}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-5 border border-slate-200 rounded-2xl bg-white">
+                          <h4 className="font-medium text-slate-800 mb-4">总占用与孤儿数据</h4>
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                            <div className="space-y-3 text-sm">
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">总占用</span>
+                                <span className="font-medium text-slate-800">{formatBytes(storageSummary.totals.sizeBytes)}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">存储根目录</span>
+                                <span className="font-medium text-slate-800 break-all text-right">{storageSummary.directories.root.path}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">是否存在孤儿数据</span>
+                                <span className={cn("font-medium", storageSummary.orphaned.hasAny ? "text-amber-600" : "text-emerald-600")}>
+                                  {storageSummary.orphaned.hasAny ? '有' : '无'}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="space-y-3 text-sm">
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">孤儿文件记录数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.orphaned.fileRecords}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">孤儿主文件引用数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.orphaned.invoicePrimaryFiles}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">原始目录孤儿文件数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.orphaned.diskOriginalFiles}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-slate-500">预览目录孤儿文件数</span>
+                                <span className="font-medium text-slate-800">{storageSummary.orphaned.diskPreviewFiles}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {!isStorageSummaryLoading && !storageSummary && !storageSummaryError && (
+                      <div className="rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm text-slate-500">
+                        当前还没有可展示的本地存储统计。
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

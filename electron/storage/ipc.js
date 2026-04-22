@@ -1,7 +1,7 @@
 import { ipcMain, shell } from 'electron';
 import path from 'path';
-import { getStorageDatabaseInfo, getStorageDb } from './database.js';
-import { getStoragePlanningSnapshot, getStorageUsageSummary, saveOriginalFile } from './files.js';
+import { getStorageDb, getStorageDbSummary } from './database.js';
+import { clearStorageCache, collectDirectoryStats, saveOriginalFile } from './files.js';
 import { ensureStorageLayout, getStoragePaths } from './paths.js';
 
 let registered = false;
@@ -26,13 +26,107 @@ function normalizeInvoicePayload(payload = {}) {
     created_at: payload.created_at ?? new Date().toISOString(),
     import_batch_id: payload.import_batch_id ?? null,
     source_page: payload.source_page ?? null,
-    image_base64: payload.image_base64 ?? null,
     primary_file_id: payload.primary_file_id ?? null,
     original_file_path: payload.original_file_path ?? null,
     preview_file_path: payload.preview_file_path ?? null,
     thumbnail_file_path: payload.thumbnail_file_path ?? null,
-    storage_status: payload.storage_status ?? 'ready',
-    storage_version: payload.storage_version ?? 1,
+  };
+}
+
+function getPublicStoragePaths() {
+  const paths = getStoragePaths();
+  return {
+    storageRoot: paths.storageRoot,
+    databaseFile: paths.databaseFile,
+    originalsRoot: paths.originalsRoot,
+    previewsRoot: paths.previewsRoot,
+    thumbnailsRoot: paths.thumbnailsRoot,
+    ocrTempRoot: paths.ocrTempRoot,
+    exportTempRoot: paths.exportTempRoot,
+    logsRoot: paths.logsRoot,
+  };
+}
+
+function normalizePathForMatch(filePath) {
+  return path.normalize(filePath || '').toLowerCase();
+}
+
+function buildStorageSummary() {
+  const paths = getStoragePaths();
+  const db = getStorageDb();
+  const dbSummary = getStorageDbSummary();
+  const originalsStats = collectDirectoryStats(paths.originalsRoot);
+  const previewsStats = collectDirectoryStats(paths.previewsRoot);
+  const cacheStats = collectDirectoryStats(paths.cacheRoot);
+  const storedFiles = db
+    .prepare(`
+      SELECT absolute_path
+      FROM files
+      WHERE absolute_path IS NOT NULL AND TRIM(absolute_path) <> ''
+    `)
+    .all();
+  const trackedPaths = new Set(
+    storedFiles.map((row) => normalizePathForMatch(row.absolute_path)).filter(Boolean)
+  );
+  const orphanDiskOriginalFileCount = originalsStats.filePaths.reduce((count, filePath) => {
+    return count + (trackedPaths.has(normalizePathForMatch(filePath)) ? 0 : 1);
+  }, 0);
+  const orphanDiskPreviewFileCount = previewsStats.filePaths.reduce((count, filePath) => {
+    return count + (trackedPaths.has(normalizePathForMatch(filePath)) ? 0 : 1);
+  }, 0);
+  const totalSizeBytes =
+    dbSummary.databaseFileSize + originalsStats.bytes + previewsStats.bytes + cacheStats.bytes;
+
+  return {
+    database: {
+      path: dbSummary.databasePath,
+      exists: dbSummary.databaseFileExists,
+      sizeBytes: dbSummary.databaseFileSize,
+      schemaVersion: dbSummary.schemaVersion,
+    },
+    counts: {
+      invoices: dbSummary.invoiceCount,
+      files: dbSummary.fileCount,
+      imageBase64: dbSummary.imageBase64Count,
+      missingOriginalFilePath: dbSummary.missingOriginalFilePathCount,
+    },
+    directories: {
+      root: {
+        path: paths.storageRoot,
+      },
+      originals: {
+        path: paths.originalsRoot,
+        sizeBytes: originalsStats.bytes,
+        fileCount: originalsStats.fileCount,
+      },
+      previews: {
+        path: paths.previewsRoot,
+        sizeBytes: previewsStats.bytes,
+        fileCount: previewsStats.fileCount,
+      },
+      cache: {
+        path: paths.cacheRoot,
+        sizeBytes: cacheStats.bytes,
+        fileCount: cacheStats.fileCount,
+      },
+    },
+    totals: {
+      sizeBytes: totalSizeBytes,
+    },
+    orphaned: {
+      fileRecords: dbSummary.orphanFileRecordCount,
+      invoicePrimaryFiles: dbSummary.orphanInvoicePrimaryFileCount,
+      diskOriginalFiles: orphanDiskOriginalFileCount,
+      diskPreviewFiles: orphanDiskPreviewFileCount,
+      hasAny:
+        dbSummary.orphanFileRecordCount > 0 ||
+        dbSummary.orphanInvoicePrimaryFileCount > 0 ||
+        orphanDiskOriginalFileCount > 0 ||
+        orphanDiskPreviewFileCount > 0,
+    },
+    capabilities: {
+      supportsImageBase64Column: dbSummary.supportsImageBase64Column,
+    },
   };
 }
 
@@ -45,29 +139,46 @@ export function registerStorageIpcHandlers() {
   getStorageDb();
 
   ipcMain.handle('storage:get-paths', async () => {
-    return getStoragePlanningSnapshot();
+    return getPublicStoragePaths();
   });
 
   ipcMain.handle('storage:get-summary', async () => {
-    return {
-      database: getStorageDatabaseInfo(),
-      usage: getStorageUsageSummary(),
-    };
+    return buildStorageSummary();
   });
 
   ipcMain.handle('storage:open-root', async () => {
     const paths = getStoragePaths();
-    const target = paths.storageRoot;
-    const errorMessage = await shell.openPath(target);
+    const error = await shell.openPath(paths.storageRoot);
+
     return {
-      ok: errorMessage === '',
-      target,
-      error: errorMessage || null,
+      ok: !error,
+      target: paths.storageRoot,
+      error: error || null,
     };
   });
 
+  ipcMain.handle('storage:clear-cache', async () => {
+    try {
+      return clearStorageCache();
+    } catch (error) {
+      return {
+        ok: false,
+        deletedBytes: 0,
+        deletedFiles: 0,
+        deletedDirectories: 0,
+        targetPaths: [
+          getStoragePaths().thumbnailsRoot,
+          getStoragePaths().ocrTempRoot,
+          getStoragePaths().exportTempRoot,
+          getStoragePaths().logsRoot,
+        ],
+        error: error instanceof Error ? error.message : '清缓存失败',
+      };
+    }
+  });
+
   ipcMain.handle('storage:save-original-file', async (_event, payload) => {
-    if (!payload?.content) {
+    if (payload?.content == null) {
       throw new Error('content is required');
     }
 
@@ -99,13 +210,10 @@ export function registerStorageIpcHandlers() {
         created_at,
         import_batch_id,
         source_page,
-        image_base64,
         primary_file_id,
         original_file_path,
         preview_file_path,
-        thumbnail_file_path,
-        storage_status,
-        storage_version
+        thumbnail_file_path
       ) VALUES (
         @raw_data,
         @invoice_code,
@@ -125,13 +233,10 @@ export function registerStorageIpcHandlers() {
         @created_at,
         @import_batch_id,
         @source_page,
-        @image_base64,
         @primary_file_id,
         @original_file_path,
         @preview_file_path,
-        @thumbnail_file_path,
-        @storage_status,
-        @storage_version
+        @thumbnail_file_path
       )
     `);
 
@@ -165,7 +270,7 @@ export function registerStorageIpcHandlers() {
 
     const updatePrimaryFile = db.prepare(`
       UPDATE invoices
-      SET primary_file_id = ?, original_file_path = ?, storage_status = 'ready'
+      SET primary_file_id = ?, original_file_path = ?
       WHERE id = ?
     `);
 

@@ -1,48 +1,10 @@
-import Database from 'better-sqlite3';
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import { ensureStorageLayout, getStoragePaths } from './paths.js';
 
 let dbInstance = null;
 
-function tableExists(db, tableName) {
-  const stmt = db.prepare(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
-  );
-  return Boolean(stmt.get(tableName));
-}
-
-function columnExists(db, tableName, columnName) {
-  if (!tableExists(db, tableName)) {
-    return false;
-  }
-
-  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
-  return columns.some((column) => column.name === columnName);
-}
-
-function addColumnIfMissing(db, tableName, columnName, columnSql) {
-  if (!columnExists(db, tableName, columnName)) {
-    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnSql}`);
-  }
-}
-
-function ensureLegacyInvoicesCompatibility(db) {
-  if (!tableExists(db, 'invoices')) {
-    return;
-  }
-
-  addColumnIfMissing(db, 'invoices', 'import_batch_id', 'import_batch_id TEXT');
-  addColumnIfMissing(db, 'invoices', 'source_page', 'source_page INTEGER');
-  addColumnIfMissing(db, 'invoices', 'image_base64', 'image_base64 TEXT');
-  addColumnIfMissing(db, 'invoices', 'primary_file_id', 'primary_file_id INTEGER');
-  addColumnIfMissing(db, 'invoices', 'original_file_path', 'original_file_path TEXT');
-  addColumnIfMissing(db, 'invoices', 'preview_file_path', 'preview_file_path TEXT');
-  addColumnIfMissing(db, 'invoices', 'thumbnail_file_path', 'thumbnail_file_path TEXT');
-  addColumnIfMissing(db, 'invoices', 'storage_status', "storage_status TEXT DEFAULT 'legacy'");
-  addColumnIfMissing(db, 'invoices', 'storage_version', 'storage_version INTEGER DEFAULT 1');
-}
-
-function runMigrations(db) {
+function initializeSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_meta (
       key TEXT PRIMARY KEY,
@@ -76,13 +38,11 @@ function runMigrations(db) {
       created_at TEXT NOT NULL,
       import_batch_id TEXT,
       source_page INTEGER,
-      image_base64 TEXT,
       primary_file_id INTEGER,
       original_file_path TEXT,
       preview_file_path TEXT,
       thumbnail_file_path TEXT,
-      storage_status TEXT NOT NULL DEFAULT 'ready',
-      storage_version INTEGER NOT NULL DEFAULT 1
+      FOREIGN KEY (primary_file_id) REFERENCES files(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS files (
@@ -102,50 +62,23 @@ function runMigrations(db) {
       FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE SET NULL
     );
 
-    CREATE TABLE IF NOT EXISTS cache_entries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      cache_type TEXT NOT NULL,
-      relative_path TEXT NOT NULL,
-      absolute_path TEXT NOT NULL,
-      size_bytes INTEGER NOT NULL DEFAULT 0,
-      owner_key TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_accessed_at TEXT
-    );
-
     CREATE INDEX IF NOT EXISTS idx_invoices_invoice_number ON invoices(invoice_number);
     CREATE INDEX IF NOT EXISTS idx_invoices_target_month ON invoices(targetMonth);
     CREATE INDEX IF NOT EXISTS idx_invoices_created_at ON invoices(created_at);
     CREATE INDEX IF NOT EXISTS idx_files_invoice_id ON files(invoice_id);
     CREATE INDEX IF NOT EXISTS idx_files_role ON files(file_role);
-    CREATE INDEX IF NOT EXISTS idx_cache_entries_type ON cache_entries(cache_type);
   `);
 
-  ensureLegacyInvoicesCompatibility(db);
-
-  const migrationVersion = 1;
-  const hasMigration = db
-    .prepare('SELECT version FROM migrations WHERE version = ?')
-    .get(migrationVersion);
-
-  if (!hasMigration) {
-    const now = new Date().toISOString();
-    db.prepare(
-      'INSERT INTO migrations (version, name, applied_at) VALUES (?, ?, ?)'
-    ).run(migrationVersion, 'phase1_storage_foundation', now);
-
-    db.prepare(`
-      INSERT INTO app_meta (key, value, updated_at)
-      VALUES (@key, @value, @updated_at)
-      ON CONFLICT(key) DO UPDATE SET
-        value = excluded.value,
-        updated_at = excluded.updated_at
-    `).run({
-      key: 'storage_schema_version',
-      value: String(migrationVersion),
-      updated_at: now,
-    });
-  }
+  db.prepare(`
+    INSERT INTO app_meta (key, value, updated_at)
+    VALUES (@key, @value, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET
+      value = excluded.value,
+      updated_at = CURRENT_TIMESTAMP
+  `).run({
+    key: 'storage_schema_version',
+    value: '1',
+  });
 }
 
 export function getStorageDb() {
@@ -154,12 +87,10 @@ export function getStorageDb() {
   }
 
   const paths = ensureStorageLayout();
-  fs.mkdirSync(paths.dataRoot, { recursive: true });
-
   dbInstance = new Database(paths.databaseFile);
   dbInstance.pragma('journal_mode = WAL');
   dbInstance.pragma('foreign_keys = ON');
-  runMigrations(dbInstance);
+  initializeSchema(dbInstance);
 
   return dbInstance;
 }
@@ -173,17 +104,72 @@ export function getStorageSchemaVersion() {
 }
 
 export function getStorageDatabaseInfo() {
-  const db = getStorageDb();
   const paths = getStoragePaths();
-  const invoiceCountRow = db
-    .prepare('SELECT COUNT(*) AS count FROM invoices')
-    .get();
-  const fileCountRow = db.prepare('SELECT COUNT(*) AS count FROM files').get();
 
   return {
     path: paths.databaseFile,
     schemaVersion: getStorageSchemaVersion(),
-    invoiceCount: invoiceCountRow?.count ?? 0,
-    fileCount: fileCountRow?.count ?? 0,
+  };
+}
+
+function hasColumn(db, tableName, columnName) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return columns.some((column) => column.name === columnName);
+}
+
+export function getStorageDbSummary() {
+  const db = getStorageDb();
+  const paths = getStoragePaths();
+  const databaseFileExists = fs.existsSync(paths.databaseFile);
+  const databaseFileSize = databaseFileExists ? fs.statSync(paths.databaseFile).size : 0;
+  const supportsImageBase64Column = hasColumn(db, 'invoices', 'image_base64');
+
+  const invoiceCount = db.prepare('SELECT COUNT(*) AS count FROM invoices').get().count;
+  const fileCount = db.prepare('SELECT COUNT(*) AS count FROM files').get().count;
+  const missingOriginalFilePathCount = db
+    .prepare(`
+      SELECT COUNT(*) AS count
+      FROM invoices
+      WHERE original_file_path IS NULL OR TRIM(original_file_path) = ''
+    `)
+    .get().count;
+  const imageBase64Count = supportsImageBase64Column
+    ? db
+        .prepare(`
+          SELECT COUNT(*) AS count
+          FROM invoices
+          WHERE image_base64 IS NOT NULL AND TRIM(image_base64) <> ''
+        `)
+        .get().count
+    : 0;
+  const orphanFileRecordCount = db
+    .prepare(`
+      SELECT COUNT(*) AS count
+      FROM files f
+      LEFT JOIN invoices i ON i.id = f.invoice_id
+      WHERE f.invoice_id IS NOT NULL AND i.id IS NULL
+    `)
+    .get().count;
+  const orphanInvoicePrimaryFileCount = db
+    .prepare(`
+      SELECT COUNT(*) AS count
+      FROM invoices i
+      LEFT JOIN files f ON f.id = i.primary_file_id
+      WHERE i.primary_file_id IS NOT NULL AND f.id IS NULL
+    `)
+    .get().count;
+
+  return {
+    databasePath: paths.databaseFile,
+    databaseFileExists,
+    databaseFileSize,
+    schemaVersion: getStorageSchemaVersion(),
+    invoiceCount,
+    fileCount,
+    imageBase64Count,
+    supportsImageBase64Column,
+    missingOriginalFilePathCount,
+    orphanFileRecordCount,
+    orphanInvoicePrimaryFileCount,
   };
 }
