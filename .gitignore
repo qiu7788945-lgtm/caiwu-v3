@@ -10,3 +10,5 @@ ocr_service/.venv/
 ocr_service/venv/ocr_service/.venv311/
 .venv311/
 .venv/
+release/
+dist/
