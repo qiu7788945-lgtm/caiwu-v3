@@ -172,7 +172,7 @@ export function registerStorageIpcHandlers() {
           getStoragePaths().exportTempRoot,
           getStoragePaths().logsRoot,
         ],
-        error: error instanceof Error ? error.message : '清缓存失败',
+        error: error instanceof Error ? error.message : 'clear cache failed',
       };
     }
   });
@@ -187,7 +187,13 @@ export function registerStorageIpcHandlers() {
 
   ipcMain.handle('storage:create-invoice-record', async (_event, payload) => {
     const db = getStorageDb();
-    const invoice = normalizeInvoicePayload(payload?.invoice);
+    const sourceInvoice = payload?.invoice ?? {};
+    const invoice = {
+      ...normalizeInvoicePayload(sourceInvoice),
+      image_base64: sourceInvoice.image_base64 ?? null,
+      storage_status: sourceInvoice.storage_status ?? null,
+      storage_version: sourceInvoice.storage_version ?? null,
+    };
     const file = payload?.file ?? null;
 
     const insertInvoice = db.prepare(`
@@ -210,6 +216,9 @@ export function registerStorageIpcHandlers() {
         created_at,
         import_batch_id,
         source_page,
+        image_base64,
+        storage_status,
+        storage_version,
         primary_file_id,
         original_file_path,
         preview_file_path,
@@ -233,6 +242,9 @@ export function registerStorageIpcHandlers() {
         @created_at,
         @import_batch_id,
         @source_page,
+        @image_base64,
+        @storage_status,
+        @storage_version,
         @primary_file_id,
         @original_file_path,
         @preview_file_path,
